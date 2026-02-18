@@ -1,0 +1,34 @@
+[
+  {
+    "timestamp": "2026-02-18T12:08:13.004397",
+    "script": "test_20260218_120057.spec.js",
+    "step": 4,
+    "description": "2026-02-18 12:01:16 click",
+    "old_locator": "xpath=//div[@id='secti-client']//div[normalize-space(.)='pmqaautomationuat']",
+    "new_locator": "xpath=//div[@id='section-client']//div[normalize-space(.)='pmqaautomationuat']"
+  },
+  {
+    "timestamp": "2026-02-18T12:08:25.956116",
+    "script": "test_20260218_120057.spec.js",
+    "step": 5,
+    "description": "2026-02-18 12:01:22 click",
+    "old_locator": "xpath=//input[@id='subm-button']",
+    "new_locator": "xpath=//input[@id='submit-button']"
+  },
+  {
+    "timestamp": "2026-02-18T12:08:39.072979",
+    "script": "test_20260218_120057.spec.js",
+    "step": 6,
+    "description": "2026-02-18 12:01:28 click",
+    "old_locator": "xpath=//input[@id='passrd']",
+    "new_locator": "xpath=//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-02-18T12:08:51.608654",
+    "script": "test_20260218_120057.spec.js",
+    "step": 7,
+    "description": "2026-02-18 12:01:32 fill",
+    "old_locator": "xpath=//input[@id='pass']",
+    "new_locator": "xpath=//input[@id='password']"
+  }
+]
