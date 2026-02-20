@@ -19,7 +19,7 @@ test('Generated Test', async ({ page }) => {
     await page.click(`xpath=//input[@id='submit-button' and @type='submit' and @value='Next']`);
     // step: Click on the password field
     // 2026-02-19 10:05:49 click
-    await page.click(`xpath=//input[@id='password']`);
+    await page.click(`xpath=//input[@id='password' and @type='password']`);
     // step: Enter "ivp@123" in the password field
     // 2026-02-19 10:05:53 fill
     await page.fill(`xpath=//input[@id='password']`, `ivp@123`);

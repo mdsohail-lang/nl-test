@@ -222,5 +222,37 @@
     "description": "2026-02-19 09:10:04 fill",
     "old_locator": "xpath=//div[@id='username']",
     "new_locator": "xpath=//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-02-20T14:00:04.327295",
+    "script": "test_20260220_135429.spec.js",
+    "step": 9,
+    "description": "2026-02-20 13:55:35 click",
+    "old_locator": "xpath=//button[@role='tab78' and @id='tabControlTabName-IVPPriceMaster/Blotter']",
+    "new_locator": "xpath=//div[@aria-label='Pricing Blotter']/ancestor::button[@role='tab']"
+  },
+  {
+    "timestamp": "2026-02-20T14:00:39.039592",
+    "script": "test_20260220_135429.spec.js",
+    "step": 10,
+    "description": "2026-02-20 13:56:04 click",
+    "old_locator": "xpath=//*[@data-testid='mu-icon']",
+    "new_locator": "xpath=//*[@data-testid='menu-icon']"
+  },
+  {
+    "timestamp": "2026-02-20T15:02:28.561230",
+    "script": "test_20260219_100511.spec.js",
+    "step": 6,
+    "description": "2026-02-19 10:05:49 click",
+    "old_locator": "xpath=//input[@id='password123']",
+    "new_locator": "xpath=//input[@id='password' and @type='password']"
+  },
+  {
+    "timestamp": "2026-02-20T15:03:11.567212",
+    "script": "test_20260219_100511.spec.js",
+    "step": 10,
+    "description": "2026-02-19 10:06:44 click",
+    "old_locator": "xpath=//*[@data-testid='menu-']",
+    "new_locator": "xpath=//*[@data-testid='menu-icon']"
   }
 ]
