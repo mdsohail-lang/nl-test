@@ -64,6 +64,7 @@ def parse_spec_file(file_path):
     goto_url = None
     actions = []
     pending_comment = None
+    pending_step_desc = None
 
     # Regex to pull the string content from either 'xxx' or `xxx`
     # We capture the delimiter to know which format we're in
@@ -74,7 +75,12 @@ def parse_spec_file(file_path):
 
         # Capture comments as step descriptions
         if stripped.startswith("//"):
-            pending_comment = stripped.lstrip("/").strip()
+            comment_text = stripped.lstrip("/").strip()
+            # Check for step description comment (// step: ...)
+            if comment_text.startswith("step:"):
+                pending_step_desc = comment_text[len("step:"):].strip()
+            else:
+                pending_comment = comment_text
             continue
 
         # ── page.goto ──
@@ -82,6 +88,7 @@ def parse_spec_file(file_path):
         if m:
             goto_url = m.group(1) if m.group(1) is not None else m.group(2)
             pending_comment = None
+            pending_step_desc = None
             continue
 
         # ── page.click / page.dblclick / page.hover ──
@@ -92,8 +99,9 @@ def parse_spec_file(file_path):
             )
             if m:
                 locator = m.group(1) if m.group(1) is not None else m.group(2)
-                actions.append(_action(idx, pending_comment, raw_line, action_name, locator))
+                actions.append(_action(idx, pending_comment, raw_line, action_name, locator, step_description=pending_step_desc))
                 pending_comment = None
+                pending_step_desc = None
                 break
         else:
             # ── page.fill / page.selectOption / page.press  (two-arg) ──
@@ -105,8 +113,9 @@ def parse_spec_file(file_path):
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
                     value   = m.group(3) if m.group(3) is not None else m.group(4)
-                    actions.append(_action(idx, pending_comment, raw_line, action_name, locator, value))
+                    actions.append(_action(idx, pending_comment, raw_line, action_name, locator, value, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     break
             else:
                 # ── page.dragAndDrop ──
@@ -117,8 +126,9 @@ def parse_spec_file(file_path):
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
                     value   = m.group(3) if m.group(3) is not None else m.group(4)
-                    actions.append(_action(idx, pending_comment, raw_line, "dragAndDrop", locator, value))
+                    actions.append(_action(idx, pending_comment, raw_line, "dragAndDrop", locator, value, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     continue
 
                 # ── page.locator(...).scrollIntoViewIfNeeded() ──
@@ -128,8 +138,9 @@ def parse_spec_file(file_path):
                 )
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
-                    actions.append(_action(idx, pending_comment, raw_line, "scroll", locator))
+                    actions.append(_action(idx, pending_comment, raw_line, "scroll", locator, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     continue
 
                 # ── expect(...).toContainText(...) ──
@@ -140,17 +151,19 @@ def parse_spec_file(file_path):
                 if m:
                     locator = m.group(1) if m.group(1) is not None else m.group(2)
                     value   = m.group(3) if m.group(3) is not None else m.group(4)
-                    actions.append(_action(idx, pending_comment, raw_line, "validate", locator, value))
+                    actions.append(_action(idx, pending_comment, raw_line, "validate", locator, value, step_description=pending_step_desc))
                     pending_comment = None
+                    pending_step_desc = None
                     continue
 
     return goto_url, actions, lines
 
 
-def _action(line_index, comment, raw_line, action_type, locator, value=None):
+def _action(line_index, comment, raw_line, action_type, locator, value=None, step_description=None):
     return {
         "line_index": line_index,
         "comment": comment,
+        "step_description": step_description,
         "raw_line": raw_line,
         "action_type": action_type,
         "locator": locator,
@@ -195,8 +208,8 @@ def heal_locator(page, step_description, old_locator):
     Returns the new formatted locator string (e.g. 'xpath=//...' or CSS),
     or None if healing failed.
     """
-    print(f"   HEALING: old locator = {old_locator}")
-    print(f"   Step description: {step_description}")
+    print(f"  🔧 HEALING: old locator = {old_locator}")
+    print(f"  🔧 Step description: {step_description}")
 
     try:
         dom = get_page_dom_simple(page)
@@ -208,13 +221,13 @@ def heal_locator(page, step_description, old_locator):
 
         if new_locator:
             formatted = f"xpath={new_locator}" if locator_type == "xpath" else new_locator
-            print(f"   HEALED: new locator = {formatted}")
+            print(f"  ✅ HEALED: new locator = {formatted}")
             return formatted
         else:
-            print(f"   HEALING FAILED: AI returned no locator")
+            print(f"  ❌ HEALING FAILED: AI returned no locator")
             return None
     except Exception as e:
-        print(f"   HEALING ERROR: {str(e)[:120]}")
+        print(f"  ❌ HEALING ERROR: {str(e)[:120]}")
         return None
 
 
@@ -239,7 +252,7 @@ def log_healing(spec_path, step_index, comment, old_locator, new_locator):
 
     with open(HEAL_LOG_FILE, "w", encoding="utf-8") as f:
         json.dump(log, f, indent=2)
-    print(f"   Healing logged to {os.path.basename(HEAL_LOG_FILE)}")
+    print(f"  📝 Healing logged to {os.path.basename(HEAL_LOG_FILE)}")
 
 
 def update_spec_file(spec_path, lines, line_index, old_locator, new_locator):
@@ -269,7 +282,7 @@ def run_script(spec_path):
     """
     spec_path = os.path.abspath(spec_path)
     if not os.path.exists(spec_path):
-        print(f" File not found: {spec_path}")
+        print(f"❌ File not found: {spec_path}")
         return False
 
     print(f"\n{'='*70}")
@@ -295,7 +308,7 @@ def run_script(spec_path):
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print(" Playwright is not installed. Run: pip install playwright && playwright install")
+        print("❌ Playwright is not installed. Run: pip install playwright && playwright install")
         return False
 
     passed = 0
@@ -312,9 +325,9 @@ def run_script(spec_path):
         try:
             page.goto(goto_url, timeout=30000)
             wait_for_loader(page)
-            print(f"   Page loaded\n")
+            print(f"  ✅ Page loaded\n")
         except Exception as e:
-            print(f"   Navigation failed: {str(e)[:100]}")
+            print(f"  ❌ Navigation failed: {str(e)[:100]}")
             browser.close()
             return False
 
@@ -341,23 +354,30 @@ def run_script(spec_path):
             # Attempt the action
             try:
                 execute_action(page, a_type, locator, value)
-                print(f"          PASS\n")
+                print(f"         ✅ PASS\n")
                 passed += 1
                 time.sleep(0.3)  # small settle delay
 
             except Exception as original_error:
                 error_msg = str(original_error)[:120]
-                print(f"          FAILED: {error_msg}")
+                print(f"         ❌ FAILED: {error_msg}")
 
                 # ── Self-heal ──
-                step_description = desc if desc != a_type else f"{a_type} on element"
+                # Prefer step_description (natural language) over comment (timestamp) for healing
+                step_desc = action.get("step_description")
+                if step_desc:
+                    step_description = step_desc
+                elif desc != a_type:
+                    step_description = desc
+                else:
+                    step_description = f"{a_type} on element"
                 new_locator = heal_locator(page, step_description, locator)
 
                 if new_locator:
                     # Retry with healed locator
                     try:
                         execute_action(page, a_type, new_locator, value)
-                        print(f"          HEALED & PASS\n")
+                        print(f"         ✅ HEALED & PASS\n")
                         healed += 1
                         passed += 1
 
@@ -370,20 +390,20 @@ def run_script(spec_path):
                         time.sleep(0.3)
 
                     except Exception as retry_error:
-                        print(f"          HEALED LOCATOR ALSO FAILED: {str(retry_error)[:100]}")
-                        print(f"          FAIL\n")
+                        print(f"         ❌ HEALED LOCATOR ALSO FAILED: {str(retry_error)[:100]}")
+                        print(f"         ❌ FAIL\n")
                         failed += 1
                 else:
-                    print(f"          FAIL (healing unsuccessful)\n")
+                    print(f"         ❌ FAIL (healing unsuccessful)\n")
                     failed += 1
 
         # Done
         print(f"\n{'='*70}")
         print(f"  RESULTS")
         print(f"{'='*70}")
-        print(f"   Passed:  {passed}")
-        print(f"   Failed:  {failed}")
-        print(f"   Healed:  {healed}")
+        print(f"  ✅ Passed:  {passed}")
+        print(f"  ❌ Failed:  {failed}")
+        print(f"  🔧 Healed:  {healed}")
         print(f"{'='*70}\n")
 
         browser.close()
@@ -413,7 +433,7 @@ def main():
     else:
         spec_path = find_latest_spec()
         if not spec_path:
-            print(" No .spec.js files found in playwright_script/ directory.")
+            print("❌ No .spec.js files found in playwright_script/ directory.")
             print("   Usage: python script_runner.py <path_to_spec.js>")
             sys.exit(1)
         print(f"No file specified — running latest: {os.path.basename(spec_path)}")
