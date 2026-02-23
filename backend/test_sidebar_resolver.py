@@ -120,5 +120,66 @@ class DecomposeHeuristicTests(unittest.TestCase):
         self.assertEqual(parts, [step])
 
 
+class DateDecompositionTests(unittest.TestCase):
+    def test_select_date_day_month_year(self):
+        steps = worker.deterministic_date_sub_steps('Select date 8 APR 2026')
+        self.assertEqual(
+            steps,
+            ['Click on Calendar Button', 'Click on year', 'Click on 2026', 'Click on Apr', 'Click on 8']
+        )
+
+    def test_select_date_month_day_year(self):
+        steps = worker.deterministic_date_sub_steps('Select date April 8, 2026')
+        self.assertEqual(
+            steps,
+            ['Click on Calendar Button', 'Click on year', 'Click on 2026', 'Click on Apr', 'Click on 8']
+        )
+
+    def test_set_date_iso(self):
+        steps = worker.deterministic_date_sub_steps('Set date 2026-04-08')
+        self.assertEqual(
+            steps,
+            ['Click on Calendar Button', 'Click on year', 'Click on 2026', 'Click on Apr', 'Click on 8']
+        )
+
+    def test_select_date_slash_defaults_mm_dd(self):
+        parsed = worker.parse_date_selection_step('Select date 04/08/2026')
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['year'], 2026)
+        self.assertEqual(parsed['month'], 4)
+        self.assertEqual(parsed['day'], 8)
+        self.assertEqual(parsed['month_short'], 'Apr')
+
+    def test_select_date_slash_fallback_dd_mm_when_mm_dd_invalid(self):
+        parsed = worker.parse_date_selection_step('Select date 13/04/2026')
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['year'], 2026)
+        self.assertEqual(parsed['month'], 4)
+        self.assertEqual(parsed['day'], 13)
+        self.assertEqual(parsed['month_short'], 'Apr')
+
+    def test_invalid_date_returns_none(self):
+        self.assertIsNone(worker.parse_date_selection_step('Select date 31/02/2026'))
+        self.assertIsNone(worker.parse_date_selection_step('Click on Reports'))
+
+
+class CalendarTargetExtractionTests(unittest.TestCase):
+    def test_extract_calendar_day_target_valid(self):
+        self.assertEqual(worker.extract_calendar_day_target('Click on 8'), 8)
+        self.assertEqual(worker.extract_calendar_day_target('Select 8'), 8)
+
+    def test_extract_calendar_day_target_invalid(self):
+        self.assertIsNone(worker.extract_calendar_day_target('Click on 32'))
+        self.assertIsNone(worker.extract_calendar_day_target('Click on 2026'))
+
+    def test_calendar_day_xpath_generation_scoped_and_in_month_first(self):
+        xpaths = worker.build_calendar_day_xpaths(8)
+        self.assertGreaterEqual(len(xpaths), 2)
+        self.assertIn("//div[@role='dialog']//div[contains(@class,'MuiDateCalendar-root')]", xpaths[0])
+        self.assertIn("@role='gridcell'", xpaths[0])
+        self.assertIn("not(contains(@class,'MuiPickersDay-dayOutsideMonth'))", xpaths[0])
+        self.assertIn("normalize-space(.)='8'", xpaths[0])
+
+
 if __name__ == '__main__':
     unittest.main()

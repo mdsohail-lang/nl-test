@@ -154,6 +154,67 @@ FUZZY_MATCH_THRESHOLD = 0.86
 FUZZY_MARGIN_THRESHOLD = 0.05
 CONTAINS_MATCH_THRESHOLD = 0.60
 
+CALENDAR_YEAR_MIN = 1900
+CALENDAR_YEAR_MAX = 2100
+
+MONTH_NUMBER_TO_SHORT = {
+    1: 'Jan',
+    2: 'Feb',
+    3: 'Mar',
+    4: 'Apr',
+    5: 'May',
+    6: 'Jun',
+    7: 'Jul',
+    8: 'Aug',
+    9: 'Sep',
+    10: 'Oct',
+    11: 'Nov',
+    12: 'Dec',
+}
+MONTH_SHORT_TO_FULL = {
+    'Jan': 'January',
+    'Feb': 'February',
+    'Mar': 'March',
+    'Apr': 'April',
+    'May': 'May',
+    'Jun': 'June',
+    'Jul': 'July',
+    'Aug': 'August',
+    'Sep': 'September',
+    'Oct': 'October',
+    'Nov': 'November',
+    'Dec': 'December',
+}
+MONTH_TEXT_TO_SHORT = {
+    'jan': 'Jan',
+    'january': 'Jan',
+    'feb': 'Feb',
+    'february': 'Feb',
+    'mar': 'Mar',
+    'march': 'Mar',
+    'apr': 'Apr',
+    'april': 'Apr',
+    'may': 'May',
+    'jun': 'Jun',
+    'june': 'Jun',
+    'jul': 'Jul',
+    'july': 'Jul',
+    'aug': 'Aug',
+    'august': 'Aug',
+    'sep': 'Sep',
+    'sept': 'Sep',
+    'september': 'Sep',
+    'oct': 'Oct',
+    'october': 'Oct',
+    'nov': 'Nov',
+    'november': 'Nov',
+    'dec': 'Dec',
+    'december': 'Dec',
+}
+MONTH_SHORT_TO_NUMBER = {
+    short: month_num for month_num, short in MONTH_NUMBER_TO_SHORT.items()
+}
+
 
 def _collapse_ws(value):
     return re.sub(r'\s+', ' ', str(value or '')).strip()
@@ -231,6 +292,427 @@ def _build_top_candidates(candidates, limit=3):
             'score': round(float(item.get('_score', 0.0)), 4)
         })
     return out
+
+
+def normalize_month_token(token):
+    """
+    Normalize month text/number to short label used by the calendar UI (e.g. 'Apr').
+    Returns None for invalid tokens.
+    """
+    raw = _collapse_ws(str(token or '')).strip('.,')
+    if not raw:
+        return None
+
+    if raw.isdigit():
+        month_num = int(raw)
+        return MONTH_NUMBER_TO_SHORT.get(month_num)
+
+    normalized = re.sub(r'[^a-zA-Z]', '', raw).lower()
+    return MONTH_TEXT_TO_SHORT.get(normalized)
+
+
+def _validate_calendar_date(year, month_num, day):
+    if year < CALENDAR_YEAR_MIN or year > CALENDAR_YEAR_MAX:
+        return False
+    if month_num < 1 or month_num > 12:
+        return False
+    if day < 1 or day > 31:
+        return False
+    try:
+        datetime(year, month_num, day)
+        return True
+    except Exception:
+        return False
+
+
+def parse_date_selection_step(description):
+    """
+    Parse a free-form date-selection step and return:
+      {'day': int, 'month': int, 'year': int, 'month_short': 'Apr'}
+    Returns None when no valid date-selection intent is detected.
+    """
+    text = _collapse_ws(description or '')
+    if not text:
+        return None
+
+    lower = text.lower()
+    has_date_hint = bool(re.search(r'\b(date|calendar)\b', lower))
+    starts_as_date_action = bool(re.match(r'^\s*(select|choose|pick|set)\b', lower))
+    if not has_date_hint and not starts_as_date_action:
+        return None
+
+    parsed = None
+
+    # YYYY-MM-DD or YYYY/MM/DD
+    iso_match = re.search(r'(?<!\d)(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?!\d)', text)
+    if iso_match:
+        year = int(iso_match.group(1))
+        month = int(iso_match.group(2))
+        day = int(iso_match.group(3))
+        if _validate_calendar_date(year, month, day):
+            parsed = {'day': day, 'month': month, 'year': year}
+
+    # 8 Apr 2026 / 8 April 2026
+    if not parsed:
+        day_month_year = re.search(
+            r'(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,12})\.?,?\s+(\d{4})(?!\d)',
+            text,
+            flags=re.IGNORECASE,
+        )
+        if day_month_year:
+            day = int(day_month_year.group(1))
+            month_short = normalize_month_token(day_month_year.group(2))
+            year = int(day_month_year.group(3))
+            if month_short:
+                month = MONTH_SHORT_TO_NUMBER[month_short]
+                if _validate_calendar_date(year, month, day):
+                    parsed = {'day': day, 'month': month, 'year': year}
+
+    # Apr 8 2026 / April 8, 2026
+    if not parsed:
+        month_day_year = re.search(
+            r'([A-Za-z]{3,12})\.?\s+(\d{1,2})(?:st|nd|rd|th)?\,?\s+(\d{4})(?!\d)',
+            text,
+            flags=re.IGNORECASE,
+        )
+        if month_day_year:
+            month_short = normalize_month_token(month_day_year.group(1))
+            day = int(month_day_year.group(2))
+            year = int(month_day_year.group(3))
+            if month_short:
+                month = MONTH_SHORT_TO_NUMBER[month_short]
+                if _validate_calendar_date(year, month, day):
+                    parsed = {'day': day, 'month': month, 'year': year}
+
+    # MM/DD/YYYY or MM-DD-YYYY (default), fallback to DD/MM/YYYY if MM/DD impossible.
+    if not parsed:
+        slash_dash = re.search(r'(?<!\d)(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?!\d)', text)
+        if slash_dash:
+            first = int(slash_dash.group(1))
+            second = int(slash_dash.group(2))
+            year = int(slash_dash.group(3))
+
+            # Default to MM/DD.
+            mm = first
+            dd = second
+            if mm > 12 and second <= 12:
+                # MM/DD impossible -> fallback to DD/MM.
+                mm = second
+                dd = first
+
+            if _validate_calendar_date(year, mm, dd):
+                parsed = {'day': dd, 'month': mm, 'year': year}
+
+    if not parsed:
+        return None
+
+    parsed['month_short'] = MONTH_NUMBER_TO_SHORT[parsed['month']]
+    return parsed
+
+
+def build_date_selection_sub_steps(parsed_date):
+    if not parsed_date:
+        return None
+    year = int(parsed_date['year'])
+    month_short = parsed_date['month_short']
+    day = int(parsed_date['day'])
+    return [
+        "Click on Calendar Button",
+        "Click on year",
+        f"Click on {year}",
+        f"Click on {month_short}",
+        f"Click on {day}",
+    ]
+
+
+def deterministic_date_sub_steps(description):
+    parsed_date = parse_date_selection_step(description)
+    if not parsed_date:
+        return None
+    return build_date_selection_sub_steps(parsed_date)
+
+
+def extract_calendar_day_target(step_text):
+    """Extract a day-of-month target from click/select style steps."""
+    text = _collapse_ws(step_text or '')
+    if not text:
+        return None
+
+    # Avoid matching year clicks.
+    if re.search(r'\b(19\d{2}|20\d{2}|2100)\b', text):
+        return None
+
+    explicit = re.match(
+        r'^\s*(?:click|select|choose|pick|tap|press)\s+(?:on\s+)?(?:day|date)?\s*(\d{1,2})(?:st|nd|rd|th)?\s*$',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if explicit:
+        day = int(explicit.group(1))
+        return day if 1 <= day <= 31 else None
+
+    nums = re.findall(r'(?<!\d)(\d{1,2})(?!\d)', text)
+    if len(nums) != 1:
+        return None
+
+    day = int(nums[0])
+    return day if 1 <= day <= 31 else None
+
+
+def extract_calendar_year_target(step_text):
+    text = _collapse_ws(step_text or '')
+    if not text:
+        return None
+
+    match = re.match(
+        r'^\s*(?:click|select|choose|pick|tap|press)\s+(?:on\s+)?(19\d{2}|20\d{2}|2100)\s*$',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    year = int(match.group(1))
+    if CALENDAR_YEAR_MIN <= year <= CALENDAR_YEAR_MAX:
+        return year
+    return None
+
+
+def extract_calendar_year_view_target(step_text):
+    """
+    Detect steps that switch the date picker to year selection mode,
+    e.g. 'Click on year' or 'Select year view'.
+    """
+    text = _collapse_ws(step_text or '')
+    if not text:
+        return False
+
+    return bool(re.match(
+        r'^\s*(?:click|select|choose|pick|tap|press)\s+(?:on\s+)?(?:year|year\s+view|calendar\s+year)(?:\s+view)?\s*$',
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
+def extract_calendar_month_target(step_text):
+    text = _collapse_ws(step_text or '')
+    if not text:
+        return None
+
+    match = re.match(
+        r'^\s*(?:click|select|choose|pick|tap|press)\s+(?:on\s+)?([A-Za-z]{3,12})\s*$',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    return normalize_month_token(match.group(1))
+
+
+def extract_calendar_click_target(step_text):
+    """
+    Parse click intent for calendar interactions.
+    Returns:
+      {'kind': 'day'|'month'|'year', 'value': int|str}
+      or None.
+    """
+    year = extract_calendar_year_target(step_text)
+    if year is not None:
+        return {'kind': 'year', 'value': year}
+
+    if extract_calendar_year_view_target(step_text):
+        return {'kind': 'year-view', 'value': 'year'}
+
+    month_short = extract_calendar_month_target(step_text)
+    if month_short is not None:
+        return {'kind': 'month', 'value': month_short}
+
+    day = extract_calendar_day_target(step_text)
+    if day is not None:
+        return {'kind': 'day', 'value': day}
+
+    return None
+
+
+def build_calendar_day_xpaths(day):
+    if not isinstance(day, int) or day < 1 or day > 31:
+        return []
+    day_lit = xpath_literal(str(day))
+    return [
+        (
+            "//div[@role='dialog']//div[contains(@class,'MuiDateCalendar-root')]"
+            f"//button[@role='gridcell' and not(contains(@class,'MuiPickersDay-dayOutsideMonth')) and normalize-space(.)={day_lit}]"
+        ),
+        (
+            "//div[@role='dialog']//div[contains(@class,'MuiDateCalendar-root')]"
+            f"//button[@role='gridcell' and normalize-space(.)={day_lit}]"
+        ),
+    ]
+
+
+def build_calendar_year_view_xpaths():
+    return [
+        "//div[@role='dialog']//button[contains(@class,'MuiPickersCalendarHeader-switchViewButton')]",
+        "//div[@role='dialog']//button[contains(@aria-label,'switch to year view')]",
+        "//div[@role='dialog']//button[@aria-label='calendar view is open, switch to year view']",
+    ]
+
+
+def build_calendar_month_xpaths(month_short):
+    month_short = normalize_month_token(month_short)
+    if not month_short:
+        return []
+
+    month_full = MONTH_SHORT_TO_FULL.get(month_short, month_short)
+    month_short_lit = xpath_literal(month_short)
+    month_full_lit = xpath_literal(month_full)
+
+    return [
+        (
+            "//div[@role='dialog']"
+            f"//button[@role='radio' and (@aria-label={month_full_lit} or normalize-space(.)={month_short_lit})]"
+        ),
+        (
+            "//div[@role='dialog']"
+            f"//button[contains(@class,'MuiPickersMonth-monthButton') and (normalize-space(.)={month_short_lit} or @aria-label={month_full_lit})]"
+        ),
+        f"//div[@role='dialog']//button[normalize-space(.)={month_short_lit}]",
+    ]
+
+
+def build_calendar_year_xpaths(year):
+    if not isinstance(year, int) or year < CALENDAR_YEAR_MIN or year > CALENDAR_YEAR_MAX:
+        return []
+
+    year_lit = xpath_literal(str(year))
+    return [
+        f"//div[@role='dialog']//button[contains(@class,'MuiPickersYear-yearButton') and normalize-space(.)={year_lit}]",
+        f"//div[@role='dialog']//button[@role='radio' and normalize-space(.)={year_lit}]",
+        f"//div[@role='dialog']//button[normalize-space(.)={year_lit}]",
+    ]
+
+
+def is_calendar_dialog_open(page):
+    """True when an MUI date calendar dialog is currently visible."""
+    try:
+        loc = page.locator("xpath=//div[@role='dialog']//div[contains(@class,'MuiDateCalendar-root')]")
+        count = loc.count()
+        if count <= 0:
+            return False
+        for i in range(count):
+            if loc.nth(i).is_visible():
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _click_first_visible_xpath(page, xpaths, timeout_ms=5000):
+    """
+    Try XPath candidates in order and click the first visible element.
+    Returns (chosen_xpath, last_error).
+    """
+    last_error = ''
+    for xpath in xpaths:
+        try:
+            loc = page.locator(f"xpath={xpath}")
+            count = loc.count()
+            if count <= 0:
+                continue
+
+            visible_indexes = []
+            for i in range(count):
+                if loc.nth(i).is_visible():
+                    visible_indexes.append(i)
+
+            if not visible_indexes:
+                continue
+
+            target_index = visible_indexes[0]
+            loc.nth(target_index).click(timeout=int(timeout_ms))
+            return xpath, ''
+        except Exception as e:
+            last_error = str(e)[:160]
+
+    return None, last_error
+
+
+def click_calendar_target(page, step_text):
+    """
+    Deterministic calendar click handler.
+    Returns (ok, info). Performs click + script append when successful.
+    """
+    step_text = _collapse_ws(step_text or '')
+    target = extract_calendar_click_target(step_text)
+    calendar_open = is_calendar_dialog_open(page)
+
+    info = {
+        'resolver': 'calendar-deterministic',
+        'status': 'skipped',
+        'is_date_like': bool(target),
+        'is_calendar_open': bool(calendar_open),
+        'is_calendar_context': bool(target) and bool(calendar_open),
+        'target': step_text,
+        'targetKind': (target.get('kind') if target else None),
+        'targetValue': (target.get('value') if target else None),
+    }
+
+    if not target:
+        return False, info
+
+    if not calendar_open:
+        info.update({
+            'status': 'calendar_closed',
+            'message': 'Calendar dialog is not open for date-like click step',
+        })
+        return False, info
+
+    if target['kind'] == 'day':
+        xpaths = build_calendar_day_xpaths(int(target['value']))
+    elif target['kind'] == 'year-view':
+        xpaths = build_calendar_year_view_xpaths()
+    elif target['kind'] == 'month':
+        xpaths = build_calendar_month_xpaths(target['value'])
+    elif target['kind'] == 'year':
+        xpaths = build_calendar_year_xpaths(int(target['value']))
+    else:
+        xpaths = []
+
+    if not xpaths:
+        info.update({
+            'status': 'date_context_failed',
+            'message': f'No deterministic calendar XPath candidates for "{step_text}"',
+        })
+        return False, info
+
+    chosen_xpath, last_error = _click_first_visible_xpath(page, xpaths, timeout_ms=5000)
+    if not chosen_xpath:
+        info.update({
+            'status': 'date_context_failed',
+            'message': (
+                f'Calendar is open but could not click date target for "{step_text}"'
+                + (f' ({last_error})' if last_error else '')
+            ),
+        })
+        return False, info
+
+    try:
+        init_script()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if step_text:
+            append_script_line(f"// step: {step_text}")
+        append_script_line(f"// {timestamp} click")
+        append_script_line(f"await page.click(`{js_safe('xpath=' + chosen_xpath)}`);")
+    except Exception as e:
+        print(f"[CALENDAR] Warning: could not append deterministic click to script: {str(e)[:100]}")
+
+    info.update({
+        'status': 'clicked',
+        'locator': chosen_xpath,
+        'type': 'xpath',
+    })
+    return True, info
 
 
 def choose_best_menu_icon(menu_icons):
@@ -890,59 +1372,53 @@ def get_locator_from_ai(page_dom, step_description):
         if APP_PATTERNS:
             app_patterns_section = f"\n## Application-Specific Patterns:\n{APP_PATTERNS}\n"
 
-        prompt = f"""You are a web automation expert. Given the DOM of a webpage and a test step description, 
+        prompt = f"""You are a web automation expert. Given the DOM of a webpage and a test step description,
 find a UNIQUE XPath to locate the PRIMARY element that should be interacted with.
 
-
 ## CRITICAL RULES:
-1. Return ONLY ONE JSON object - NOT a list or array - this is MANDATORY
-2. DO NOT Use svg tags in the XPath directly. Instead, identify the purpose of the icon (e.g. menu, upload) and look for parent buttons or aria-labels or any other reliable thing that indicate its function.
-   - Focus on the PRIMARY element mentioned in the step (the one that will be acted upon first)
-3. **PRIORITY**: Always look for and prioritize elements with `data-testid` attributes (very reliable)
-4. Return ONLY XPath locators (no CSS selectors)
-5. The XPath must be UNIQUE and reliable - it should match exactly ONE element
-6. Prefer using attributes in this order:
-   - `data-testid` (most reliable, explicitly set for testing)
+1. Return ONLY ONE JSON object - NOT a list or array.
+2. Do NOT use svg tags directly in XPath. Find the clickable parent by purpose.
+3. Prefer `data-testid` when appropriate, except when a stronger context rule applies (especially date-picker interactions).
+4. Return ONLY XPath locators (no CSS selectors).
+5. The XPath must be unique and reliable.
+6. Prefer attributes in this order:
+   - `data-testid`
    - `id`, `name`, `aria-label`, `placeholder`
-   - Text content (exact or contains)
-   - Combination of attributes for uniqueness
-7. Make the XPath specific enough that it won't match other similar elements
-8. For text-driven nodes (`div`, `span`, `li`, `td`, `th`), use robust text predicates like:
+   - text content
+   - combinations for uniqueness
+7. For text-driven nodes, use robust text predicates:
    - `normalize-space(text())='Exact Text'`
    - `contains(normalize-space(.), 'Partial Text')`
-   Prefer `contains(normalize-space(.), ...)` when nested tags split text.
-9. **For SVGs and icons**: Identify the action/purpose, not just the visual. Look for parent buttons or aria-labels
-10. For hamburger icons or menu icons(svg), always return `//*[@data-testid='menu-icon']` if available. Only use fallbacks if not present.
-11. **For sidebar / navigation menu items** (e.g. "Click on Configure", "Click Challenge"):
-   - These are typically list items in a drawer/sidebar with `aria-label` on the text container or visible text in a `<span>`.
-   - Use `aria-label` attribute: `//div[@aria-label='Configure']/ancestor::div[@role='button']` 
-   - Or use text content: `//span[normalize-space(text())='Configure']/ancestor::div[@role='button']`
-   - ALWAYS target the nearest CLICKABLE ancestor element (`div[@role='button']`, `button`, or `a`) — NOT the inner text span itself.
-   - If the text uses HTML entities (e.g., `&amp;`), use `contains()` with partial text rather than exact match: `//span[contains(text(),'Challenge')]/ancestor::div[@role='button']`
-12. **For elements with special characters in text** (like `&`, `<`, `>`): Use `contains()` with a safe substring instead of exact matching.
-13. When the step says "click on X" and X appears both in a sidebar menu AND elsewhere on the page, prefer the sidebar menu item (inside a drawer/nav/MuiList container).
+8. For menu icon steps, return `//*[@data-testid='menu-icon']` when present.
+9. For sidebar/navigation items, target the nearest clickable ancestor.
+10. DATE PICKER CONTEXT IS STRICT:
+   - If an open date picker dialog exists (`role='dialog'` + `MuiDateCalendar-root`) and the step targets date/day/month/year, pick ONLY elements inside that dialog.
+   - For day clicks like "Click on 8", target `button[@role='gridcell']` and prefer current-month days over outside-month days.
+   - For month clicks like "Click on Apr", target month radio/button in the date picker dialog.
+   - For year clicks like "Click on 2026", target year radio/button in the date picker dialog.
+   - Never use unrelated counters/badges/tabs/headers for date steps; explicitly avoid `data-testid='closeCountText'` for date/day/month/year selection.
+11. When "click on X" appears both in sidebar and elsewhere, prefer sidebar only when context indicates navigation.
 {app_patterns_section}
-## Example good XPaths (with data-testid priority):
+## Example good XPaths:
    - //button[@data-testid='upload-button']
    - //input[@data-testid='email-input']
-   - //input[@placeholder='Email address']
-   - //button[contains(text(), 'Login')]
-   - //select[@name='country']
-   - //button[@aria-label='Close']
    - //div[@aria-label='Configure']/ancestor::div[@role='button']
-   - //span[contains(text(),'Challenge')]/ancestor::div[@role='button']
+   - //div[@role='dialog']//button[contains(@class,'MuiPickersYear-yearButton') and normalize-space(.)='2026']
+   - //div[@role='dialog']//button[@role='radio' and @aria-label='April']
+   - //div[@role='dialog']//div[contains(@class,'MuiDateCalendar-root')]//button[@role='gridcell' and not(contains(@class,'MuiPickersDay-dayOutsideMonth')) and normalize-space(.)='8']
 
 ## Page DOM:
 {page_dom}
 
-## Test Step: {step_description}
+## Test Step:
+{step_description}
 
 ## MUST RETURN exactly this structure (nothing else, NOT an array):
 {{
     "locator": "//xpath/to/primary/element",
     "type": "xpath",
     "element_description": "brief description",
-    "reasoning": "why this XPath works, especially if data-testid was used"
+    "reasoning": "why this XPath works"
 }}
 
 ## If no element found:
@@ -952,7 +1428,7 @@ find a UNIQUE XPath to locate the PRIMARY element that should be interacted with
     "element_description": "reason element not found"
 }}
 
-DO NOT RETURN AN ARRAY. Return ONLY one JSON object."""
+DO NOT RETURN AN ARRAY. Return ONLY one JSON object.""" 
 
         payload = {
             "model": "gpt-5-mini",
@@ -1234,7 +1710,7 @@ def get_page_dom_simple(page):
             // Skip non-visible / non-useful elements
             if (['script','style','link','meta','noscript'].includes(tag)) return '';
 
-            // Skip SVG internals (path, circle, rect, etc.) — keep the SVG tag itself for context
+            // Skip SVG internals (path, circle, rect, etc.) - keep the SVG tag itself for context
             if (['path','circle','rect','line','polygon','polyline','ellipse','use','defs',
                  'clippath','lineargradient','radialgradient','stop','g','mask','filter',
                  'fegaussianblur','feoffset','feblend','fecolormatrix','fecomposite'].includes(tag)) {
@@ -1371,6 +1847,88 @@ def get_sidebar_dom_snapshot(page):
     except Exception as e:
         print(f"[SIDEBAR DOM] Error: {str(e)[:100]}")
         return get_page_dom_simple(page)
+
+
+def get_calendar_dom_snapshot(page):
+    """
+    Capture a compact DOM snapshot of the currently open date-picker dialog.
+    Falls back to full DOM if no calendar dialog is found.
+    """
+    try:
+        calendar_dom = page.evaluate('''() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                    return false;
+                }
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const keepAttr = new Set([
+                'id', 'class', 'name', 'data-testid', 'role', 'aria-label',
+                'aria-labelledby', 'aria-describedby', 'aria-controls', 'aria-hidden',
+                'placeholder', 'title', 'type', 'aria-selected', 'aria-expanded',
+                'aria-haspopup', 'tabindex', 'value', 'href', 'src', 'xlink:href',
+                'for', 'alt', 'disabled', 'readonly', 'checked', 'selected',
+                'colspan', 'rowspan'
+            ]);
+
+            const sanitizeAttr = (name, value) => {
+                if (name === 'class' && value.length > 100) return value.substring(0, 100) + '...';
+                return value;
+            };
+
+            const getAttributes = (node) => {
+                if (!node.attributes) return '';
+                let attrs = '';
+                for (const attr of node.attributes) {
+                    const name = attr.name;
+                    if (!keepAttr.has(name)) continue;
+                    const value = sanitizeAttr(name, attr.value || '');
+                    attrs += ` ${name}="${value}"`;
+                }
+                return attrs;
+            };
+
+            const serializeNode = (node, indent = '') => {
+                if (!node || node.nodeType !== Node.ELEMENT_NODE) return '';
+                if (!isVisible(node)) return '';
+
+                const tag = node.tagName.toLowerCase();
+                if (['script', 'style', 'link', 'meta', 'noscript'].includes(tag)) return '';
+                if (['path', 'defs', 'g', 'clippath', 'mask', 'filter'].includes(tag)) return '';
+
+                let out = `${indent}<${tag}${getAttributes(node)}>` + '\\n';
+                for (const child of node.childNodes) {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        const text = (child.nodeValue || '').trim().replace(/\\s+/g, ' ');
+                        if (text) out += `${indent}  ${text}` + '\\n';
+                    } else {
+                        out += serializeNode(child, indent + '  ');
+                    }
+                }
+                out += `${indent}</${tag}>` + '\\n';
+                return out;
+            };
+
+            const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'))
+                .filter(isVisible)
+                .filter((dlg) => !!dlg.querySelector('.MuiDateCalendar-root'));
+            if (!dialogs.length) return '';
+
+            const root = dialogs[0];
+            return '## CALENDAR DIALOG\\n' + serializeNode(root);
+        }''')
+
+        if calendar_dom and str(calendar_dom).strip():
+            return calendar_dom
+        return get_page_dom_simple(page)
+    except Exception as e:
+        print(f"[CALENDAR DOM] Error: {str(e)[:100]}")
+        return get_page_dom_simple(page)
+
 
 def extract_data_testid_summary(page):
     """Extract all elements with data-testid for quick reference"""
@@ -1793,6 +2351,10 @@ def decompose_step_with_ai(description):
     Returns: list of step description strings
     """
     heuristic_steps = heuristic_decompose_step(description)
+    deterministic_steps = deterministic_date_sub_steps(description)
+    if deterministic_steps:
+        print(f"[DECOMPOSE] Deterministic date decomposition: {deterministic_steps}")
+        return deterministic_steps
 
     if not SECRET_KEY:
         print("[DECOMPOSE] Skipped: SECRET_KEY not configured")
@@ -1883,7 +2445,13 @@ def decompose_step_with_ai(description):
             "   - 'Click submit' / 'Hit save' -> 'submit'/'save' are most likely buttons\n"
             "   - 'Check terms' / 'Tick agree' -> most likely checkboxes\n"
             "   Any field name the user mentions (instance, country, gender, role, status, category, priority, "
-            "   department, etc.) should be treated as the element's label/name on the page.\n\n"
+            "   department, etc.) should be treated as the element's label/name on the page.\n"
+            "21. DATE PICKER WORKFLOW: For date selection in calendar/date-picker widgets, ALWAYS decompose into:\n"
+            "   (a) Click on Calendar Button, (b) Click on year, (c) Click on <YYYY>, "
+            "   (d) Click on <Month>, (e) Click on <Day>.\n"
+            "   Month should be the visible month label used by the picker (e.g., Apr).\n"
+            "22. If a step is just 'Click on 8' and previous sub-steps already opened the calendar/date picker, "
+            "   keep it as day selection intent for the calendar (not badges, tabs, counters, or unrelated elements).\n\n"
             "Examples:\n"
             '- Input: "Enter email \\"admin@test.com\\" and password \\"pass123\\""\n'
             '  Output: ["Click on email field", "Enter \\"admin@test.com\\" in email field", '
@@ -1939,6 +2507,14 @@ def decompose_step_with_ai(description):
             '  Output: ["Click on username field", "Enter \\"john\\" in username field"]\n\n'
             '- Input: "Enter \\"pass123\\" in the password field"\n'
             '  Output: ["Click on the password field", "Enter \\"pass123\\" in the password field"]\n\n'
+            '- Input: "Select date 8 APR 2026"\n'
+            '  Output: ["Click on Calendar Button", "Click on year", "Click on 2026", "Click on Apr", "Click on 8"]\n\n'
+            '- Input: "Select date April 8, 2026"\n'
+            '  Output: ["Click on Calendar Button", "Click on year", "Click on 2026", "Click on Apr", "Click on 8"]\n\n'
+            '- Input: "Set date 2026-04-08"\n'
+            '  Output: ["Click on Calendar Button", "Click on year", "Click on 2026", "Click on Apr", "Click on 8"]\n\n'
+            '- Input: "Select date 04/08/2026"\n'
+            '  Output: ["Click on Calendar Button", "Click on year", "Click on 2026", "Click on Apr", "Click on 8"]\n\n'
             f'Now decompose this step:\n"{description}"\n\n'
             "Return ONLY a JSON array of strings. No explanation, no markdown, just the JSON array."
         )
@@ -2088,7 +2664,12 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
         """Capture DOM snapshot for diagnostics and LLM context reuse."""
         nonlocal last_dom_snapshot, last_dom_kind, last_dom_reason, last_dom_marker
         try:
-            raw_dom = get_sidebar_dom_snapshot(page) if snapshot_kind == 'sidebar' else get_page_dom_simple(page)
+            if snapshot_kind == 'sidebar':
+                raw_dom = get_sidebar_dom_snapshot(page)
+            elif snapshot_kind == 'calendar':
+                raw_dom = get_calendar_dom_snapshot(page)
+            else:
+                raw_dom = get_page_dom_simple(page)
             dom_payload = raw_dom
             if include_testid:
                 testid_summary = extract_data_testid_summary(page)
@@ -2342,7 +2923,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         print(f"[EXECUTE] SUCCESS: Screenshot taken")
                         
                     elif action == 'scroll' and value != 'element':
-                        # Standalone scroll (no element target) — no locator needed
+                        # Standalone scroll (no element target) - no locator needed
                         import time
                         print(f"[EXECUTE] Scrolling: {value}")
                         if value == 'top':
@@ -2459,11 +3040,55 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         
                         else:
                             sidebar_info = None
+                            calendar_info = None
                             action_handled = False
                             effective_sidebar_context = False
 
-                            # 1) Deterministic sidebar resolver first for click actions.
                             if action == 'click':
+                                # 1) Deterministic calendar resolver first for click actions.
+                                print("[EXECUTE] Trying deterministic calendar resolver...")
+                                calendar_ok, calendar_info = click_calendar_target(page, description_for_exec or search_text)
+
+                                if calendar_ok:
+                                    locator = calendar_info.get('locator')
+                                    locator_type = calendar_info.get('type', 'xpath')
+                                    print(f"[EXECUTE] Calendar resolver clicked: {locator}")
+
+                                    wait_for_loader(page)
+                                    refresh_dom_after_click('post-click-calendar-deterministic')
+                                    results.append({
+                                        'step': idx,
+                                        'description': description_for_exec,
+                                        'action': action,
+                                        'ok': True,
+                                        'locator': locator,
+                                        'type': locator_type,
+                                        'value': str(value)[:50] if value else None,
+                                        'resolver': 'calendar-deterministic',
+                                        'calendarContext': True,
+                                    })
+                                    print(f"[EXECUTE] SUCCESS: {description_for_exec} (calendar-deterministic)")
+                                    action_handled = True
+                                elif calendar_info and calendar_info.get('is_calendar_context') and calendar_info.get('is_date_like'):
+                                    # Calendar is open and step is date-like; fail explicitly to avoid unrelated clicks.
+                                    error_msg = calendar_info.get('message') or (
+                                        f'Calendar date target could not be resolved for "{description_for_exec}"'
+                                    )
+                                    print(f"[EXECUTE] FAILED: {error_msg}")
+                                    results.append({
+                                        'step': idx,
+                                        'description': description_for_exec,
+                                        'action': action,
+                                        'ok': False,
+                                        'error': error_msg,
+                                        'resolver': 'calendar-deterministic',
+                                        'calendarContext': True,
+                                    })
+                                    action_failed = True
+                                    action_handled = True
+
+                            # 2) Deterministic sidebar resolver for click actions.
+                            if action == 'click' and not action_handled and not action_failed:
                                 print("[EXECUTE] Trying deterministic sidebar resolver...")
                                 sidebar_ok, sidebar_info = click_sidebar_target(page, description_for_exec or search_text)
                                 effective_sidebar_context = bool(sidebar_info and sidebar_info.get('is_sidebar_context'))
@@ -2546,6 +3171,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                 # 3) LLM remains the main locator path.
                                 llm_attempted = False
                                 llm_used_sidebar_dom = False
+                                llm_used_calendar_dom = False
                                 if not locator:
                                     resolver = 'llm'
                                     print(f"[EXECUTE] Capturing DOM for LLM locator...")
@@ -2553,6 +3179,15 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                         print("[EXECUTE] Using sidebar-focused DOM snapshot for LLM fallback")
                                         dom = capture_and_store_dom('sidebar', include_testid=True, reason='llm-sidebar')
                                         llm_used_sidebar_dom = True
+                                    elif (
+                                        action == 'click'
+                                        and calendar_info
+                                        and calendar_info.get('is_calendar_context')
+                                        and calendar_info.get('is_date_like')
+                                    ):
+                                        print("[EXECUTE] Using calendar-focused DOM snapshot for LLM fallback")
+                                        dom = capture_and_store_dom('calendar', include_testid=True, reason='llm-calendar')
+                                        llm_used_calendar_dom = True
                                     else:
                                         print("[EXECUTE] Using full-page DOM snapshot for LLM fallback")
                                         dom = capture_and_store_dom('full', include_testid=True, reason='llm-full')
@@ -2570,6 +3205,22 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                     wait_for_dom_settle(timeout_ms=1600, quiet_ms=250, label='llm-null-sidebar-retry')
                                     retry_dom = capture_and_store_dom('sidebar', include_testid=True, reason='llm-sidebar-retry')
                                     llm_used_sidebar_dom = True
+                                    locator, locator_type = get_locator_from_ai(
+                                        retry_dom or '',
+                                        description_for_exec or search_text
+                                    )
+                                elif (
+                                    not locator
+                                    and llm_attempted
+                                    and action == 'click'
+                                    and calendar_info
+                                    and calendar_info.get('is_calendar_context')
+                                    and calendar_info.get('is_date_like')
+                                ):
+                                    print("[EXECUTE] LLM returned no locator; retrying once with fresh calendar DOM...")
+                                    wait_for_dom_settle(timeout_ms=1600, quiet_ms=250, label='llm-null-calendar-retry')
+                                    retry_dom = capture_and_store_dom('calendar', include_testid=True, reason='llm-calendar-retry')
+                                    llm_used_calendar_dom = True
                                     locator, locator_type = get_locator_from_ai(
                                         retry_dom or '',
                                         description_for_exec or search_text
@@ -2624,7 +3275,11 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                         })
                                         print(f"[EXECUTE] SUCCESS: {description_for_exec}")
                                         if action == 'click':
-                                            substep_sidebar_click_success = bool(effective_sidebar_context or llm_used_sidebar_dom)
+                                            substep_sidebar_click_success = bool(
+                                                effective_sidebar_context
+                                                or llm_used_sidebar_dom
+                                                or llm_used_calendar_dom
+                                            )
                                     else:
                                         results.append({
                                             'step': idx,
@@ -2761,3 +3416,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
