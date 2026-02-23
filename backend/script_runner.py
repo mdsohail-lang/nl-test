@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Playwright Script Runner with AI Self-Healing Locators
 
