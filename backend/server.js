@@ -4,8 +4,49 @@ const path = require('path');
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const SAVED_URLS_PATH = path.join(__dirname, 'saved_urls.json');
 
 const jobs = new Map();
+
+function ensureSavedUrlsFile() {
+    if (!fs.existsSync(SAVED_URLS_PATH)) {
+        fs.writeFileSync(SAVED_URLS_PATH, '[]', 'utf8');
+    }
+}
+
+function readSavedUrls() {
+    ensureSavedUrlsFile();
+    try {
+        const raw = fs.readFileSync(SAVED_URLS_PATH, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .filter((item) => item && typeof item === 'object')
+            .map((item) => ({
+                name: String(item.name || '').trim(),
+                url: String(item.url || '').trim(),
+                createdAt: item.createdAt || null,
+                updatedAt: item.updatedAt || null,
+            }))
+            .filter((item) => item.name && item.url);
+    } catch (e) {
+        return [];
+    }
+}
+
+function writeSavedUrls(savedUrls) {
+    fs.writeFileSync(SAVED_URLS_PATH, JSON.stringify(savedUrls, null, 2), 'utf8');
+}
+
+function normalizeHttpUrl(value) {
+    try {
+        const parsed = new URL(String(value || '').trim());
+        if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+        return parsed.toString();
+    } catch (e) {
+        return null;
+    }
+}
 
 
 let worker = null;
@@ -206,6 +247,79 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    if (req.method === 'GET' && req.url === '/saved-urls') {
+        try {
+            const savedUrls = readSavedUrls();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ savedUrls }));
+        } catch (e) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to read saved URLs' }));
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/saved-urls') {
+        const chunks = [];
+        req.on('data', (chunk) => chunks.push(chunk));
+        req.on('end', () => {
+            try {
+                const bodyText = Buffer.concat(chunks).toString('utf8');
+                const payload = bodyText ? JSON.parse(bodyText) : {};
+
+                const name = String(payload.name || '').trim();
+                const normalizedUrl = normalizeHttpUrl(payload.url);
+
+                if (!name) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Name is required' }));
+                    return;
+                }
+                if (!normalizedUrl) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'A valid http(s) URL is required' }));
+                    return;
+                }
+
+                const savedUrls = readSavedUrls();
+                const nowIso = new Date().toISOString();
+                const existingIndex = savedUrls.findIndex(
+                    (entry) => String(entry.name || '').toLowerCase() === name.toLowerCase()
+                );
+
+                let savedUrl = null;
+                if (existingIndex >= 0) {
+                    savedUrl = {
+                        ...savedUrls[existingIndex],
+                        name,
+                        url: normalizedUrl,
+                        updatedAt: nowIso,
+                    };
+                    savedUrls[existingIndex] = savedUrl;
+                } else {
+                    savedUrl = {
+                        name,
+                        url: normalizedUrl,
+                        createdAt: nowIso,
+                    };
+                    savedUrls.push(savedUrl);
+                }
+
+                writeSavedUrls(savedUrls);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, savedUrl, savedUrls }));
+            } catch (e) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
+            }
+        });
+        req.on('error', (err) => {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Failed to save URL', details: String(err) }));
+        });
+        return;
+    }
+
     if (req.method === 'POST' && req.url === '/upload-test') {
         const contentType = req.headers['content-type'] || '';
         const match = contentType.match(/multipart\/form-data; boundary=(.+)/);
@@ -297,7 +411,19 @@ const server = http.createServer((req, res) => {
         const progressPath = path.join(UPLOAD_DIR, `${id}.progress.json`);
         if (!fs.existsSync(progressPath)) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ currentStep: 0, totalSteps: 0, completedSteps: [], failedSteps: [] }));
+            res.end(JSON.stringify({
+                currentStep: 0,
+                currentStepIndex: 0,
+                totalSteps: 0,
+                currentDescription: "",
+                completedSteps: [],
+                failedSteps: [],
+                completedStepCount: 0,
+                failedStepCount: 0,
+                executedStepCount: 0,
+                status: "running",
+                completed: false,
+            }));
             return;
         }
         const data = fs.readFileSync(progressPath, 'utf8');

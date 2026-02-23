@@ -292,15 +292,36 @@ export default function DashboardPage() {
     pending: "bg-slate-100 text-slate-700 border-slate-200",
   };
   const isTerminalStatus = jobStatus === "completed" || jobStatus === "failed";
-  const completedCount = progress?.completedSteps?.length || 0;
-  const failedCount = progress?.failedSteps?.length || 0;
+  const uniqueStepCount = (items) => {
+    if (!Array.isArray(items)) return 0;
+    const ids = new Set(
+      items
+        .map((item) => item?.step)
+        .filter((step) => Number.isInteger(step))
+    );
+    return ids.size;
+  };
+  const completedCount =
+    progress?.completedStepCount ?? uniqueStepCount(progress?.completedSteps);
+  const failedCount =
+    progress?.failedStepCount ?? uniqueStepCount(progress?.failedSteps);
+  const executedCount = progress?.executedStepCount ?? completedCount + failedCount;
+  const totalProgressSteps = progress?.totalSteps || 0;
   const completionPercent =
-    progress?.totalSteps > 0
-      ? Math.round((progress.currentStep / progress.totalSteps) * 100)
+    totalProgressSteps > 0
+      ? Math.round((executedCount / totalProgressSteps) * 100)
       : 0;
-  const remainingSteps = progress
-    ? Math.max(progress.totalSteps - (completedCount + failedCount), 0)
-    : 0;
+  const remainingSteps = Math.max(totalProgressSteps - executedCount, 0);
+  const currentStepIndex = Number.isInteger(progress?.currentStepIndex)
+    ? progress.currentStepIndex
+    : Math.min(Math.max(executedCount, 0), Math.max(totalProgressSteps - 1, 0));
+  const currentStepDisplay = totalProgressSteps > 0 ? currentStepIndex + 1 : 0;
+  const showCurrentlyExecuting =
+    jobStatus === "running" && !!progress && totalProgressSteps > 0;
+  const formatStepNumber = (stepValue) =>
+    Number.isInteger(stepValue) ? stepValue + 1 : "?";
+  const hasExecutedResults =
+    Array.isArray(result?.executed) && result.executed.length > 0;
   const isMessageError = /error|failed/i.test(message);
 
   return (
@@ -576,7 +597,7 @@ export default function DashboardPage() {
                       <div>
                         <div className="flex items-center justify-between text-sm font-semibold text-slate-700">
                           <span>
-                            Step {progress.currentStep}/{progress.totalSteps}
+                            Step {totalProgressSteps > 0 ? currentStepDisplay : 0}/{totalProgressSteps}
                           </span>
                           <span>{completionPercent}%</span>
                         </div>
@@ -592,12 +613,12 @@ export default function DashboardPage() {
                         <div>
                           <p className="mb-2 inline-flex items-center gap-2 text-sm font-semibold text-emerald-700">
                             <CheckCircle2 className="h-4 w-4" />
-                            Completed ({progress.completedSteps.length})
+                            Completed ({completedCount})
                           </p>
                           <div className="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-emerald-200 bg-white p-2 text-xs">
                             {progress.completedSteps.map((s, i) => (
                               <div key={i} className="rounded-md bg-emerald-50 px-2 py-1 text-emerald-700">
-                                Step {s.step}: {s.description || s.action}
+                                Step {formatStepNumber(s.step)}: {s.description || s.action}
                               </div>
                             ))}
                           </div>
@@ -608,12 +629,12 @@ export default function DashboardPage() {
                         <div>
                           <p className="mb-2 inline-flex items-center gap-2 text-sm font-semibold text-rose-700">
                             <XCircle className="h-4 w-4" />
-                            Failed ({progress.failedSteps.length})
+                            Failed ({failedCount})
                           </p>
                           <div className="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-rose-200 bg-white p-2 text-xs">
                             {progress.failedSteps.map((s, i) => (
                               <div key={i} className="rounded-md bg-rose-50 px-2 py-1 text-rose-700">
-                                Step {s.step + 1}: {s.description || s.action} -{" "}
+                                Step {formatStepNumber(s.step)}: {s.description || s.action} -{" "}
                                 {s.error?.slice(0, 50)}
                               </div>
                             ))}
@@ -621,13 +642,13 @@ export default function DashboardPage() {
                         </div>
                       )}
 
-                      {progress.totalSteps > completedCount + failedCount && (
+                      {showCurrentlyExecuting && (
                         <div className="rounded-xl border border-sky-200 bg-white p-3">
                           <p className="text-sm font-semibold text-slate-800">
                             Currently Executing
                           </p>
                           <p className="mt-1 text-xs font-semibold text-sky-700">
-                            Step {progress.currentStep + 1}/{progress.totalSteps}
+                            Step {currentStepDisplay}/{totalProgressSteps}
                           </p>
                           <p className="mt-1 text-sm text-slate-600">
                             {progress.currentDescription || "Processing..."}
@@ -650,8 +671,14 @@ export default function DashboardPage() {
               {result && (
                 <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
                   <h4 className="mb-3 text-lg font-bold text-slate-900">Test Results</h4>
-                  {result.success ? (
+                  {hasExecutedResults ? (
                     <div className="space-y-4 text-sm">
+                      {!result.success && (
+                        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">
+                          Execution completed with one or more mandatory step failures.
+                          {result.error ? ` ${result.error}` : ""}
+                        </div>
+                      )}
                       {result.executed && Array.isArray(result.executed) && (
                         <div>
                           <p className="mb-3 text-sm font-semibold text-sky-800">

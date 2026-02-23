@@ -64,18 +64,139 @@ def load_app_patterns():
 
 APP_PATTERNS = load_app_patterns()
 
-def write_progress(job_id, results, current_step, total_steps, current_description=''):
-    """Write progress file so frontend can track execution in real-time"""
-    path = os.path.join(UPLOAD_DIR, f"{job_id}.progress.json")
-    progress = {
-        'jobId': job_id,
-        'currentStep': current_step,
-        'totalSteps': total_steps,
-        'currentDescription': current_description,
-        'completedSteps': [r for r in results if r.get('ok') is True],
-        'failedSteps': [r for r in results if r.get('ok') is False],
-        'completed': current_step >= total_steps
+NON_BLOCKING_ACTIONS = {'validate'}
+
+
+def is_non_blocking_action(action):
+    return str(action or '').strip().lower() in NON_BLOCKING_ACTIONS
+
+
+def is_blocking_failure(action):
+    return not is_non_blocking_action(action)
+
+
+def _is_int_step_id(step_value):
+    return isinstance(step_value, int) and not isinstance(step_value, bool)
+
+
+def _coerce_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def summarize_top_level_steps(results):
+    """Summarize per-action result rows into top-level step outcomes."""
+    per_step = {}
+
+    for item in results:
+        step = item.get('step')
+        if not _is_int_step_id(step):
+            continue
+
+        entry = per_step.setdefault(step, {
+            'step': step,
+            'description': '',
+            'action': '',
+            'error': '',
+            'has_success': False,
+            'has_failure': False,
+        })
+
+        desc = _collapse_ws(item.get('description'))
+        if desc and not entry['description']:
+            entry['description'] = desc
+
+        action = _collapse_ws(item.get('action'))
+        if action:
+            entry['action'] = action
+
+        ok = item.get('ok')
+        if ok is True:
+            entry['has_success'] = True
+        elif ok is False:
+            entry['has_failure'] = True
+            err = _collapse_ws(item.get('error'))
+            if err:
+                entry['error'] = err
+            if desc:
+                entry['description'] = desc
+
+    completed_steps = []
+    failed_steps = []
+    for step in sorted(per_step.keys()):
+        entry = per_step[step]
+        base = {
+            'step': step,
+            'description': entry['description'] or entry['action'] or f'Step {step + 1}',
+            'action': entry['action'] or None,
+        }
+        if entry['has_failure']:
+            failed_steps.append({
+                **base,
+                'ok': False,
+                'error': entry['error'] or 'Step failed',
+            })
+        elif entry['has_success']:
+            completed_steps.append({
+                **base,
+                'ok': True,
+            })
+
+    return {
+        'completedSteps': completed_steps,
+        'failedSteps': failed_steps,
+        'completedStepCount': len(completed_steps),
+        'failedStepCount': len(failed_steps),
+        'executedStepCount': len(completed_steps) + len(failed_steps),
     }
+
+
+def build_progress_payload(job_id, results, current_step_index, total_steps, current_description='', status='running'):
+    total_steps = max(_coerce_int(total_steps, 0), 0)
+    summary = summarize_top_level_steps(results)
+
+    if total_steps > 0:
+        current_step_index = min(max(_coerce_int(current_step_index, 0), 0), total_steps - 1)
+    else:
+        current_step_index = 0
+
+    if status in ('completed', 'failed', 'stopped') and total_steps > 0:
+        executed_count = summary['executedStepCount']
+        if status == 'completed':
+            current_step_index = total_steps - 1
+        elif executed_count > 0:
+            current_step_index = min(executed_count - 1, total_steps - 1)
+
+    return {
+        'jobId': job_id,
+        # Keep legacy currentStep, but make it user-facing (1-based).
+        'currentStep': (current_step_index + 1) if total_steps > 0 else 0,
+        'currentStepIndex': current_step_index,
+        'totalSteps': total_steps,
+        'currentDescription': _collapse_ws(current_description),
+        'completedSteps': summary['completedSteps'],
+        'failedSteps': summary['failedSteps'],
+        'completedStepCount': summary['completedStepCount'],
+        'failedStepCount': summary['failedStepCount'],
+        'executedStepCount': summary['executedStepCount'],
+        'status': status,
+        'completed': status in ('completed', 'failed', 'stopped'),
+    }
+
+
+def write_progress(job_id, results, current_step, total_steps, current_description='', status='running'):
+    """Write progress file so frontend can track execution in real-time."""
+    path = os.path.join(UPLOAD_DIR, f"{job_id}.progress.json")
+    progress = build_progress_payload(
+        job_id,
+        results,
+        current_step,
+        total_steps,
+        current_description=current_description,
+        status=status,
+    )
     try:
         with open(path, 'w', encoding='utf8') as f:
             json.dump(progress, f, indent=2)
@@ -215,9 +336,258 @@ MONTH_SHORT_TO_NUMBER = {
     short: month_num for month_num, short in MONTH_NUMBER_TO_SHORT.items()
 }
 
+VALIDATION_ACTION_PREFIX_RE = re.compile(
+    r'^\s*(?:validate|verify|assert)\s+(?:that\s+)?',
+    flags=re.IGNORECASE
+)
+VALIDATION_LOCATION_NOISE_RE = re.compile(
+    r'\b(?:at|in|on)\s+the\s+'
+    r'(?:top|bottom|left|right|middle|center)'
+    r'(?:\s+(?:left|right|top|bottom))?'
+    r'(?:\s+of\s+the\s+page)?\b.*$',
+    flags=re.IGNORECASE
+)
+VALIDATION_PAGE_SUFFIX_RE = re.compile(
+    r'\b(?:of|on|in)\s+the\s+page\b.*$',
+    flags=re.IGNORECASE
+)
+
 
 def _collapse_ws(value):
     return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+
+def _normalize_match_text(value):
+    return _collapse_ws(html.unescape(str(value or ''))).lower()
+
+
+def _normalize_numeric_token(token):
+    cleaned = re.sub(r'[,\s]', '', str(token or ''))
+    if not re.fullmatch(r'[+-]?\d+(?:\.\d+)?', cleaned):
+        return None
+    return cleaned.lstrip('+')
+
+
+def _extract_numeric_tokens(text):
+    if not text:
+        return []
+    raw_tokens = re.findall(r'(?<!\d)[+-]?\d[\d,]*(?:\.\d+)?(?!\d)', str(text))
+    out = []
+    for raw in raw_tokens:
+        normalized = _normalize_numeric_token(raw)
+        if normalized:
+            out.append(normalized)
+    return out
+
+
+def _strip_validation_anchor_noise(anchor_text):
+    anchor = _collapse_ws(anchor_text or '').strip(' "\'`')
+    if not anchor:
+        return ''
+    anchor = VALIDATION_LOCATION_NOISE_RE.sub('', anchor)
+    anchor = VALIDATION_PAGE_SUFFIX_RE.sub('', anchor)
+    anchor = re.sub(r'^\s*(?:the|a|an)\s+', '', anchor, flags=re.IGNORECASE)
+    return _collapse_ws(anchor.strip(' "\'`.,:;-'))
+
+
+def parse_validation_intent(description, quoted_value=None):
+    """
+    Parse validate/verify/assert instructions into expected text and optional anchor.
+    Supports:
+      - "Validate X against Y"
+      - "Verify Y is X"
+      - quoted validations
+    """
+    text = _collapse_ws(description or '')
+    cleaned = VALIDATION_ACTION_PREFIX_RE.sub('', text).strip()
+    if not cleaned:
+        return {'expected': '', 'anchor': None, 'rawExpected': '', 'rawAnchor': None}
+
+    against_match = re.search(
+        r'(?is)^(.+?)\s+(?:against|vs|versus)\s+(.+)$',
+        cleaned
+    )
+    if against_match:
+        raw_expected = _collapse_ws(against_match.group(1))
+        raw_anchor = _collapse_ws(against_match.group(2))
+    else:
+        comparison_match = re.search(
+            r'(?is)^(.+?)\s+(?:is|equals?|=|:|to\s+be)\s+(.+)$',
+            cleaned
+        )
+        if comparison_match:
+            left = _collapse_ws(comparison_match.group(1))
+            right = _collapse_ws(comparison_match.group(2))
+            left_nums = _extract_numeric_tokens(left)
+            right_nums = _extract_numeric_tokens(right)
+            if left_nums and not right_nums:
+                raw_expected, raw_anchor = left, right
+            else:
+                raw_expected, raw_anchor = right, left
+        else:
+            raw_expected = _collapse_ws(quoted_value or cleaned)
+            raw_anchor = None
+
+    expected = _collapse_ws(str(raw_expected or '').strip(' "\'`'))
+    anchor = _strip_validation_anchor_noise(raw_anchor)
+    return {
+        'expected': expected,
+        'anchor': anchor or None,
+        'rawExpected': raw_expected or '',
+        'rawAnchor': raw_anchor,
+    }
+
+
+def _match_expected_text(haystack_text, expected_text):
+    haystack_norm = _normalize_match_text(haystack_text)
+    expected_norm = _normalize_match_text(expected_text)
+    if not expected_norm:
+        return False, None
+    if expected_norm in haystack_norm:
+        return True, 'exact'
+
+    expected_nums = _extract_numeric_tokens(expected_norm)
+    if expected_nums:
+        haystack_nums = set(_extract_numeric_tokens(haystack_norm))
+        if all(num in haystack_nums for num in expected_nums):
+            return True, 'numeric'
+
+    return False, None
+
+
+def _match_anchor_proximity(haystack_text, anchor_text, expected_text, max_gap=160):
+    haystack_norm = _normalize_match_text(haystack_text)
+    anchor_norm = _normalize_match_text(anchor_text)
+    expected_norm = _normalize_match_text(expected_text)
+    if not haystack_norm or not anchor_norm or not expected_norm:
+        return False, None
+
+    start = haystack_norm.find(anchor_norm)
+    while start != -1:
+        low = max(0, start - max_gap)
+        high = min(len(haystack_norm), start + len(anchor_norm) + max_gap)
+        window = haystack_norm[low:high]
+        if expected_norm in window:
+            return True, 'anchor-proximity'
+        expected_nums = _extract_numeric_tokens(expected_norm)
+        if expected_nums:
+            window_nums = set(_extract_numeric_tokens(window))
+            if all(num in window_nums for num in expected_nums):
+                return True, 'anchor-proximity-numeric'
+        start = haystack_norm.find(anchor_norm, start + 1)
+
+    return False, None
+
+
+def _collect_visible_text_blocks(page, max_blocks=500):
+    try:
+        return page.evaluate(
+            '''(maxBlocks) => {
+                const blocks = [];
+                const seen = new Set();
+                const all = document.querySelectorAll('body *');
+                for (const el of all) {
+                    if (!(el instanceof HTMLElement)) continue;
+                    const style = window.getComputedStyle(el);
+                    if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+                    const rect = el.getBoundingClientRect();
+                    if (!rect || rect.width === 0 || rect.height === 0) continue;
+                    const txt = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (!txt || txt.length > 240) continue;
+                    const key = txt.toLowerCase();
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    blocks.push(txt);
+                    if (blocks.length >= maxBlocks) break;
+                }
+                return blocks;
+            }''',
+            int(max_blocks)
+        ) or []
+    except Exception:
+        return []
+
+
+def validate_text_intelligently(page, expected_text, anchor_text=None):
+    expected = _collapse_ws(expected_text or '').strip(' "\'`')
+    anchor = _strip_validation_anchor_noise(anchor_text)
+    if not expected:
+        return {
+            'ok': False,
+            'error': 'Validation failed: Expected text is empty',
+            'matchedBy': None,
+            'expected': expected,
+            'anchor': anchor or None,
+        }
+
+    try:
+        page_text = page.locator('body').inner_text(timeout=5000) or ''
+    except Exception as e:
+        return {
+            'ok': False,
+            'error': f'Validation error: {str(e)[:100]}',
+            'matchedBy': None,
+            'expected': expected,
+            'anchor': anchor or None,
+        }
+
+    ok, matched_by = _match_expected_text(page_text, expected)
+    if ok and not anchor:
+        return {
+            'ok': True,
+            'error': None,
+            'matchedBy': f'page-text-{matched_by}',
+            'expected': expected,
+            'anchor': None,
+        }
+
+    if anchor:
+        prox_ok, prox_by = _match_anchor_proximity(page_text, anchor, expected)
+        if prox_ok:
+            return {
+                'ok': True,
+                'error': None,
+                'matchedBy': prox_by,
+                'expected': expected,
+                'anchor': anchor,
+            }
+
+        text_blocks = _collect_visible_text_blocks(page)
+        for block in text_blocks:
+            anchor_hit, _ = _match_expected_text(block, anchor)
+            if not anchor_hit:
+                continue
+            exp_hit, exp_by = _match_expected_text(block, expected)
+            if exp_hit:
+                return {
+                    'ok': True,
+                    'error': None,
+                    'matchedBy': f'anchor-block-{exp_by}',
+                    'expected': expected,
+                    'anchor': anchor,
+                }
+
+    if ok:
+        return {
+            'ok': True,
+            'error': None,
+            'matchedBy': f'page-text-{matched_by}',
+            'expected': expected,
+            'anchor': anchor or None,
+        }
+
+    if anchor:
+        error = f'Validation failed: Expected "{expected}" near "{anchor}" not found on page'
+    else:
+        error = f'Validation failed: Text "{expected}" not found on page'
+
+    return {
+        'ok': False,
+        'error': error,
+        'matchedBy': None,
+        'expected': expected,
+        'anchor': anchor or None,
+    }
 
 
 def _basic_sidebar_text(value):
@@ -2191,6 +2561,8 @@ def parse_natural_language_step(description):
     action = None
     value = None
     search_text = description  # Text to search for in the page DOM
+    validation_expected = None
+    validation_anchor = None
     
     # Match action patterns (case-insensitive)
     if re.search(r'\bdouble\s*click\b', description, re.I) or re.search(r'\bdbl\s*click\b', description, re.I):
@@ -2284,20 +2656,18 @@ def parse_natural_language_step(description):
     
     elif re.search(r'\bvalidate\b', description, re.I) or re.search(r'\bassert\b', description, re.I) or re.search(r'\bverify\b', description, re.I):
         action = 'validate'
-        # For validation, extract the text we're looking for
-        if quoted_value:
-            value = quoted_value
-            search_text = quoted_value
-        else:
-            # Extract text after "validate" or "assert" or "verify"
-            search_text = re.sub(r'\b(?:validate|assert|verify)\s+(?:that\s+)?', '', description, flags=re.I).strip()
-            search_text = re.sub(r'\s+(?:appears|exists|is|shows|displays|contains)\b.*', '', search_text, flags=re.I).strip()
-            value = search_text
-    
+        intent = parse_validation_intent(description, quoted_value=quoted_value)
+        validation_expected = intent.get('expected') or quoted_value or ''
+        validation_anchor = intent.get('anchor')
+        value = validation_expected
+        search_text = validation_anchor or validation_expected
+
     return {
         'action': action,
         'value': value,
         'search_text': search_text,
+        'validation_expected': validation_expected,
+        'validation_anchor': validation_anchor,
         'original': description
     }
 
@@ -2592,6 +2962,8 @@ def execute_all_tests_with_playwright(test_cases, website_url, job_id):
         raise ValueError('website_url is required for execution')
 
     all_test_results = []
+    had_critical_failure = False
+    stopped = False
     browser = None
     
     try:
@@ -2624,6 +2996,13 @@ def execute_all_tests_with_playwright(test_cases, website_url, job_id):
                     'networkLogs': test_output["networkLogs"],
                     'consoleLogs': test_output["consoleLogs"]
                 })
+                had_critical_failure = had_critical_failure or bool(test_output.get('criticalFailure'))
+                stopped = stopped or bool(test_output.get('stopped'))
+
+                # Stop the full run when a critical interaction fails or stop signal is received.
+                if had_critical_failure or stopped:
+                    print("[EXECUTE] Halting remaining test cases due to terminal condition")
+                    break
             
             # Close page after all tests
             if page:
@@ -2645,13 +3024,19 @@ def execute_all_tests_with_playwright(test_cases, website_url, job_id):
                 pass
         raise
     
-    return all_test_results
+    return {
+        'tests': all_test_results,
+        'hadCriticalFailure': had_critical_failure,
+        'stopped': stopped,
+    }
 
 def execute_single_test(browser, steps, website_url, job_id, test_name, page=None):
     """Execute a single test case within an existing browser. Reuses page if provided."""
     results = []
     network_logs = []
     console_logs = []
+    critical_failure = False
+    execution_stopped = False
     page_created_here = False
     last_dom_snapshot = None
     last_dom_kind = None
@@ -2659,6 +3044,8 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
     last_dom_marker = None
     current_step_marker = None
     last_sidebar_click_key = None
+    current_progress_step_index = 0
+    current_progress_description = ''
 
     def capture_and_store_dom(snapshot_kind='full', include_testid=True, reason=''):
         """Capture DOM snapshot for diagnostics and LLM context reuse."""
@@ -2816,11 +3203,32 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
         
         # Execute each step
         total_steps = len(steps)
+        current_progress_step_index = 0 if total_steps > 0 else 0
+        current_progress_description = ''
+
+        def flush_progress(status='running', step_index=None, description=None):
+            nonlocal current_progress_step_index, current_progress_description
+            if step_index is not None:
+                current_progress_step_index = int(step_index)
+            if description is not None:
+                current_progress_description = str(description or '')
+
+            write_progress(
+                job_id,
+                results,
+                current_progress_step_index,
+                total_steps,
+                current_progress_description,
+                status=status,
+            )
+
+        flush_progress(status='running', step_index=0, description='')
         for idx, step in enumerate(steps):
             # Check for stop signal before each step
             stop_path = os.path.join(UPLOAD_DIR, f".{job_id}.stop")
             if os.path.exists(stop_path):
                 print(f"\n[EXECUTE] STOP SIGNAL RECEIVED - Halting execution at step {idx+1}/{total_steps}")
+                execution_stopped = True
                 try:
                     os.remove(stop_path)
                 except:
@@ -2863,7 +3271,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                 
                 # Write progress
                 progress_desc = f"{description} (sub-step {sub_idx+1}/{len(sub_steps)})" if len(sub_steps) > 1 else (description or '')
-                write_progress(job_id, results, idx, total_steps, progress_desc)
+                flush_progress(status='running', step_index=idx, description=progress_desc)
                 
                 # Use the sub-step description for parsing and execution
                 description_for_exec = sub_step_desc
@@ -2872,6 +3280,8 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                     sub_idx > 0 and last_sidebar_click_key == f"{idx}:{sub_idx - 1}"
                 )
                 substep_sidebar_click_success = False
+                validation_expected = None
+                validation_anchor = None
                 
                 # Parse the (sub-)step
                 if not raw_action and sub_step_desc:
@@ -2879,6 +3289,8 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                     action = parsed.get('action')
                     value = parsed.get('value')
                     search_text = parsed.get('search_text', '')
+                    validation_expected = parsed.get('validation_expected')
+                    validation_anchor = parsed.get('validation_anchor')
                     print(f"[EXECUTE] Step: {sub_step_desc}")
                     print(f"[EXECUTE] Parsed action: {action}, value: {value}")
                 elif raw_action:
@@ -2886,12 +3298,20 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                     value = step.get('value') if isinstance(step, dict) else None
                     search_text = description if description else ''
                     description_for_exec = description
+                    if action == 'validate':
+                        intent = parse_validation_intent(description_for_exec)
+                        validation_expected = intent.get('expected') or (str(value) if value else '')
+                        validation_anchor = intent.get('anchor')
+                        if validation_expected:
+                            value = validation_expected
                     print(f"[EXECUTE] Step: {description if description else action}")
                     print(f"[EXECUTE] Action: {action}, value: {value}")
                 else:
                     result_item = {'step': idx, 'description': description or '', 'action': '', 'ok': False, 'error': 'No action or description found'}
                     results.append(result_item)
+                    flush_progress(status='running', step_index=idx, description=progress_desc)
                     print(f"[EXECUTE] FAILED: No action found - stopping execution")
+                    critical_failure = True
                     step_failed = True
                     break
                 
@@ -3012,30 +3432,44 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                             print(f"[EXECUTE] SUCCESS: Pressed key '{key}'")
                         
                         elif action == 'validate':
-                            # Validate action: check if text exists on page or in specific element
-                            print(f"[EXECUTE] Validating: {value}")
-                            
-                            # Check if text appears anywhere on page
-                            try:
-                                page_text = page.locator('body').text_content()
-                                if value.lower() in page_text.lower():
-                                    results.append({
-                                        'step': idx, 
-                                        'description': description_for_exec,
-                                        'action': 'validate', 
-                                        'ok': True, 
-                                        'validated_text': value
-                                    })
-                                    print(f"[EXECUTE] SUCCESS: {description_for_exec}")
-                                else:
-                                    error_msg = f'Validation failed: Text "{value}" not found on page'
-                                    print(f"[EXECUTE] FAILED: {description_for_exec} - {error_msg}")
-                                    results.append({'step': idx, 'description': description_for_exec, 'action': 'validate', 'ok': False, 'error': error_msg})
-                                    action_failed = True
-                            except Exception as e:
-                                error_msg = f'Validation error: {str(e)[:100]}'
+                            expected_for_validation = _collapse_ws(
+                                validation_expected or value or search_text or description_for_exec
+                            )
+                            anchor_for_validation = _collapse_ws(validation_anchor or '')
+                            print(
+                                f"[EXECUTE] Validating: expected='{expected_for_validation}'"
+                                + (f", anchor='{anchor_for_validation}'" if anchor_for_validation else '')
+                            )
+                            validation = validate_text_intelligently(
+                                page,
+                                expected_for_validation,
+                                anchor_for_validation,
+                            )
+                            if validation.get('ok'):
+                                results.append({
+                                    'step': idx,
+                                    'description': description_for_exec,
+                                    'action': 'validate',
+                                    'ok': True,
+                                    'validated_text': validation.get('expected'),
+                                    'validationExpected': validation.get('expected'),
+                                    'validationAnchor': validation.get('anchor'),
+                                    'validationMatchedBy': validation.get('matchedBy'),
+                                })
+                                print(f"[EXECUTE] SUCCESS: {description_for_exec} ({validation.get('matchedBy')})")
+                            else:
+                                error_msg = validation.get('error') or 'Validation failed'
                                 print(f"[EXECUTE] FAILED: {description_for_exec} - {error_msg}")
-                                results.append({'step': idx, 'description': description_for_exec, 'action': 'validate', 'ok': False, 'error': error_msg})
+                                results.append({
+                                    'step': idx,
+                                    'description': description_for_exec,
+                                    'action': 'validate',
+                                    'ok': False,
+                                    'error': error_msg,
+                                    'validationExpected': validation.get('expected'),
+                                    'validationAnchor': validation.get('anchor'),
+                                    'validationMatchedBy': validation.get('matchedBy'),
+                                })
                                 action_failed = True
                         
                         else:
@@ -3311,6 +3745,8 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                     results.append({'step': idx, 'description': description_for_exec if 'description_for_exec' in locals() else '', 'action': action if 'action' in locals() else '', 'ok': False, 'error': error_msg})
                     action_failed = True
 
+                flush_progress(status='running', step_index=idx, description=progress_desc)
+
                 if action_failed:
                     # Ensure latest DOM snapshot is persisted to debug log for this failed step.
                     if last_dom_marker != current_step_marker:
@@ -3330,28 +3766,68 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                             )
                             append_debug_log(job_id, debug_block)
 
-                if not action_failed:
-                    last_sidebar_click_key = current_step_marker if substep_sidebar_click_success else None
-  
-                # STOP SUB-STEP EXECUTION IF FAILED
                 if action_failed:
-                    print(f"[EXECUTE] Sub-step failed - stopping execution")
-                    step_failed = True
-                    break
+                    if is_blocking_failure(action):
+                        critical_failure = True
+                        print(f"[EXECUTE] Sub-step failed - stopping execution")
+                        step_failed = True
+                        break
+                    print(f"[EXECUTE] Sub-step failed but action '{action}' is non-blocking. Continuing execution.")
+                else:
+                    last_sidebar_click_key = current_step_marker if substep_sidebar_click_success else None
             
             # STOP EXECUTION IF STEP FAILED
             if step_failed:
                 print(f"[EXECUTE] Step {idx} failed - stopping execution")
                 break
-        
+
+        if execution_stopped:
+            final_status = 'stopped'
+        elif critical_failure:
+            final_status = 'failed'
+        else:
+            final_status = 'completed'
+
+        top_level_summary = summarize_top_level_steps(results)
+        executed_count = top_level_summary.get('executedStepCount', 0)
+        if total_steps > 0:
+            if final_status == 'completed':
+                final_step_index = total_steps - 1
+            elif executed_count > 0:
+                final_step_index = min(executed_count - 1, total_steps - 1)
+            else:
+                final_step_index = min(max(current_progress_step_index, 0), total_steps - 1)
+        else:
+            final_step_index = 0
+
+        flush_progress(
+            status=final_status,
+            step_index=final_step_index,
+            description=current_progress_description,
+        )
+
         # Return results and page (don't close page - will reuse for next test)
         return {
             "steps": results,
             "networkLogs": network_logs,
-            "consoleLogs": console_logs
+            "consoleLogs": console_logs,
+            "criticalFailure": critical_failure,
+            "stopped": execution_stopped,
+            "status": final_status,
         }, page
     
     except Exception as e:
+        try:
+            write_progress(
+                job_id,
+                results,
+                current_progress_step_index,
+                len(steps),
+                current_progress_description,
+                status='failed',
+            )
+        except Exception:
+            pass
         # Only close page if we created it here and something failed
         if page and page_created_here:
             try:
@@ -3398,9 +3874,14 @@ def main():
     if website_url and len(website_url) > 0:
         try:
             # Execute all test cases with a single browser
-            exec_res = execute_all_tests_with_playwright(test_cases, website_url, job_id)
-            result['executed'] = exec_res
-            result['success'] = True
+            exec_bundle = execute_all_tests_with_playwright(test_cases, website_url, job_id)
+            result['executed'] = exec_bundle.get('tests', [])
+            result['success'] = not bool(exec_bundle.get('hadCriticalFailure'))
+            result['stopped'] = bool(exec_bundle.get('stopped'))
+            if result.get('stopped'):
+                result['error'] = 'Execution stopped by user request'
+            elif not result['success']:
+                result['error'] = 'Execution failed due to one or more mandatory step failures'
         except ImportError as e:
             result['success'] = False
             result['error'] = f'execution-skipped:{e}'
