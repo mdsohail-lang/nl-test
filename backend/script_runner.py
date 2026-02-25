@@ -348,6 +348,7 @@ def run_script(spec_path):
             # Wait for page to be ready
             try:
                 wait_for_loader(page)
+                pass
             except Exception:
                 pass
 
