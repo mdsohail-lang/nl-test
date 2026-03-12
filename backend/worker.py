@@ -3415,6 +3415,15 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         url = step.get('url') or website_url
                         print(f"[EXECUTE] Navigating to: {url}")
                         page.goto(url, timeout=30000)
+                        try:
+                            init_script()
+                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            if description_for_exec:
+                                append_script_line(f"// step: {description_for_exec}")
+                            append_script_line(f"// {timestamp} navigate")
+                            append_script_line(f"await page.goto(`{js_safe(url)}`);")
+                        except Exception as e:
+                            print(f"[SCRIPT] Warning: could not record navigate step: {str(e)[:120]}")
                         results.append({'step': idx, 'action': 'navigate', 'ok': True, 'url': url})
                         print(f"[EXECUTE] SUCCESS: Navigated")
                         import time
@@ -3425,6 +3434,15 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         ms = int(value) if value else 2000
                         print(f"[EXECUTE] Waiting {ms}ms")
                         time.sleep(ms / 1000.0)
+                        try:
+                            init_script()
+                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            if description_for_exec:
+                                append_script_line(f"// step: {description_for_exec}")
+                            append_script_line(f"// {timestamp} wait")
+                            append_script_line(f"await page.waitForTimeout({int(ms)});")
+                        except Exception as e:
+                            print(f"[SCRIPT] Warning: could not record wait step: {str(e)[:120]}")
                         results.append({'step': idx, 'action': 'wait', 'ok': True, 'ms': ms})
                         print(f"[EXECUTE] SUCCESS: Wait completed")
                         
@@ -3432,6 +3450,15 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         out = os.path.join(UPLOAD_DIR, f"{int(__import__('time').time())}-step{idx}-shot.png")
                         page.screenshot(path=out)
                         print(f"[EXECUTE] Screenshot saved: {out}")
+                        try:
+                            init_script()
+                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            if description_for_exec:
+                                append_script_line(f"// step: {description_for_exec}")
+                            append_script_line(f"// {timestamp} screenshot")
+                            append_script_line(f"await page.screenshot({{ path: `{js_safe(out)}` }});")
+                        except Exception as e:
+                            print(f"[SCRIPT] Warning: could not record screenshot step: {str(e)[:120]}")
                         results.append({'step': idx, 'action': 'screenshot', 'ok': True, 'path': out})
                         print(f"[EXECUTE] SUCCESS: Screenshot taken")
                         
@@ -3441,8 +3468,26 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         print(f"[EXECUTE] Scrolling: {value}")
                         if value == 'top':
                             page.evaluate("window.scrollTo(0, 0)")
+                            try:
+                                init_script()
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                if description_for_exec:
+                                    append_script_line(f"// step: {description_for_exec}")
+                                append_script_line(f"// {timestamp} scroll top")
+                                append_script_line("await page.evaluate(() => window.scrollTo(0, 0));")
+                            except Exception as e:
+                                print(f"[SCRIPT] Warning: could not record scroll step: {str(e)[:120]}")
                         elif value == 'bottom':
                             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                            try:
+                                init_script()
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                if description_for_exec:
+                                    append_script_line(f"// step: {description_for_exec}")
+                                append_script_line(f"// {timestamp} scroll bottom")
+                                append_script_line("await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));")
+                            except Exception as e:
+                                print(f"[SCRIPT] Warning: could not record scroll step: {str(e)[:120]}")
                         else:
                             # Parse direction and optional pixel amount
                             direction = 'down'
@@ -3456,8 +3501,22 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                             
                             scroll_amount = -pixels if direction == 'up' else pixels
                             page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+                            try:
+                                init_script()
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                if description_for_exec:
+                                    append_script_line(f"// step: {description_for_exec}")
+                                append_script_line(f"// {timestamp} scroll by {scroll_amount}")
+                                append_script_line(f"await page.evaluate(() => window.scrollBy(0, {int(scroll_amount)}));")
+                            except Exception as e:
+                                print(f"[SCRIPT] Warning: could not record scroll step: {str(e)[:120]}")
                         
                         time.sleep(0.3)  # let the scroll settle
+                        try:
+                            init_script()
+                            append_script_line("await page.waitForTimeout(300);")
+                        except Exception:
+                            pass
                         results.append({'step': idx, 'description': description_for_exec, 'action': 'scroll', 'ok': True, 'value': str(value)})
                         print(f"[EXECUTE] SUCCESS: Scroll {value}")
                     
@@ -3522,6 +3581,15 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                             key = str(value) if value else 'Enter'
                             print(f"[EXECUTE] Pressing key: {key}")
                             page.press('body', key)
+                            try:
+                                init_script()
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                if description_for_exec:
+                                    append_script_line(f"// step: {description_for_exec}")
+                                append_script_line(f"// {timestamp} press")
+                                append_script_line(f"await page.press(`body`, `{js_safe(key)}`);")
+                            except Exception as e:
+                                print(f"[SCRIPT] Warning: could not record press step: {str(e)[:120]}")
                             results.append({'step': idx, 'action': 'press', 'ok': True, 'key': key})
                             print(f"[EXECUTE] SUCCESS: Pressed key '{key}'")
                         
@@ -3534,6 +3602,18 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                 f"[EXECUTE] Validating: expected='{expected_for_validation}'"
                                 + (f", anchor='{anchor_for_validation}'" if anchor_for_validation else '')
                             )
+                            try:
+                                init_script()
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                if description_for_exec:
+                                    append_script_line(f"// step: {description_for_exec}")
+                                append_script_line(f"// {timestamp} validate")
+                                if expected_for_validation:
+                                    append_script_line(
+                                        f"await expect(page.locator(`body`)).toContainText(`{js_safe(expected_for_validation)}`);"
+                                    )
+                            except Exception as e:
+                                print(f"[SCRIPT] Warning: could not record validate step: {str(e)[:120]}")
                             validation = validate_text_intelligently(
                                 page,
                                 expected_for_validation,

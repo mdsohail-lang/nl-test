@@ -40,6 +40,136 @@ SCRIPT_DIR = os.path.join(BACKEND_DIR, "playwright_script")
 HEAL_LOG_FILE = os.path.join(SCRIPT_DIR, "heal_log.json")
 INTERMEDIARY_DIR = os.path.join(BACKEND_DIR, "intermediary")
 
+ACTION_TIMEOUT_MS = 10000
+SETTLE_WAIT_MS = 300
+
+HEAL_DOM_CHANGE_WINDOW_MS = 5000
+HEAL_DOM_CHANGE_QUIET_MS = 300
+_HEAL_DOM_LISTENER_KEY = "__codexHealDomListener"
+
+
+def _start_dom_change_listener(page, key=_HEAL_DOM_LISTENER_KEY):
+    """Start a MutationObserver counter in the page to detect async DOM updates."""
+    try:
+        page.evaluate(
+            '''(key) => {
+                const stateKey = `${key}State`;
+                try {
+                    const prev = window[stateKey];
+                    if (prev && prev.observer && prev.observer.disconnect) {
+                        prev.observer.disconnect();
+                    }
+                } catch (e) {}
+
+                const state = { count: 0 };
+                const root = document.body || document.documentElement;
+                if (!root) {
+                    window[stateKey] = state;
+                    return;
+                }
+
+                const observer = new MutationObserver((mutations) => {
+                    const add = (mutations && mutations.length) ? mutations.length : 1;
+                    state.count += add;
+                });
+
+                observer.observe(root, {
+                    subtree: true,
+                    childList: true,
+                    attributes: true,
+                    characterData: true,
+                });
+
+                state.observer = observer;
+                window[stateKey] = state;
+            }''',
+            key,
+        )
+    except Exception as e:
+        print(f"  [HEAL] Warning: could not start DOM change listener: {str(e)[:120]}")
+
+
+def _get_dom_change_count(page, key=_HEAL_DOM_LISTENER_KEY):
+    try:
+        return int(page.evaluate(
+            '''(key) => {
+                const st = window[`${key}State`];
+                return (st && typeof st.count === 'number') ? st.count : 0;
+            }''',
+            key,
+        ) or 0)
+    except Exception:
+        return 0
+
+
+def _stop_dom_change_listener(page, key=_HEAL_DOM_LISTENER_KEY):
+    try:
+        page.evaluate(
+            '''(key) => {
+                const stateKey = `${key}State`;
+                const st = window[stateKey];
+                try {
+                    if (st && st.observer && st.observer.disconnect) st.observer.disconnect();
+                } catch (e) {}
+                try {
+                    delete window[stateKey];
+                } catch (e) {
+                    window[stateKey] = undefined;
+                }
+            }''',
+            key,
+        )
+    except Exception:
+        pass
+
+
+def _wait_for_dom_settle(page, timeout_ms=HEAL_DOM_CHANGE_WINDOW_MS, quiet_ms=HEAL_DOM_CHANGE_QUIET_MS):
+    """Wait for at least one DOM mutation, then a quiet period; returns {changed, mutationCount, timedOut}."""
+    try:
+        info = page.evaluate(
+            '''async ({timeoutMs, quietMs}) => {
+                const root = document.body || document.documentElement;
+                if (!root) return { changed: false, mutationCount: 0, timedOut: true };
+
+                return await new Promise((resolve) => {
+                    let mutationCount = 0;
+                    let changed = false;
+                    let quietTimer = null;
+                    let hardTimer = null;
+
+                    const finish = (timedOut) => {
+                        if (quietTimer) clearTimeout(quietTimer);
+                        if (hardTimer) clearTimeout(hardTimer);
+                        try { observer.disconnect(); } catch (e) {}
+                        resolve({ changed, mutationCount, timedOut });
+                    };
+
+                    const onMutation = (mutations) => {
+                        changed = true;
+                        mutationCount += (mutations && mutations.length) ? mutations.length : 1;
+                        if (quietTimer) clearTimeout(quietTimer);
+                        quietTimer = setTimeout(() => finish(false), quietMs);
+                    };
+
+                    const observer = new MutationObserver(onMutation);
+                    observer.observe(root, {
+                        subtree: true,
+                        childList: true,
+                        attributes: true,
+                        characterData: true,
+                    });
+
+                    // If nothing changes, exit quickly.
+                    quietTimer = setTimeout(() => finish(false), quietMs);
+                    hardTimer = setTimeout(() => finish(true), timeoutMs);
+                });
+            }''',
+            {'timeoutMs': int(timeout_ms), 'quietMs': int(quiet_ms)},
+        )
+        return info or {'changed': False, 'mutationCount': 0, 'timedOut': True}
+    except Exception:
+        return {'changed': False, 'mutationCount': 0, 'timedOut': True}
+
 
 # ─── Spec File Parser ──────────────────────────────────────────────────────────
 
@@ -166,6 +296,25 @@ def parse_spec_file(file_path):
                     pending_step_desc = None
                     continue
 
+                # ── page.waitForTimeout(ms) ──
+                m = re.search(r'await\s+page\.waitForTimeout\(\s*(\d+)\s*\)\s*;?', stripped)
+                if m:
+                    ms = m.group(1)
+                    actions.append(
+                        _action(
+                            idx,
+                            pending_comment,
+                            raw_line,
+                            "wait",
+                            "",
+                            ms,
+                            step_description=pending_step_desc,
+                        )
+                    )
+                    pending_comment = None
+                    pending_step_desc = None
+                    continue
+
                 # ── expect(...).toContainText(...) ──
                 m = re.search(
                     r'await\s+expect\(page\.locator\(' + STR_PAT + r'\)\)\.toContainText\(' + STR_PAT + r'\)',
@@ -196,11 +345,15 @@ def _action(line_index, comment, raw_line, action_type, locator, value=None, ste
 
 # ─── Action Execution ──────────────────────────────────────────────────────────
 
-def execute_action(page, action_type, locator, value=None, timeout=8000):
+def execute_action(page, action_type, locator, value=None, timeout=ACTION_TIMEOUT_MS):
     """Execute a single Playwright action. Raises on failure."""
     if action_type == "capture_screenshot":
         os.makedirs(INTERMEDIARY_DIR, exist_ok=True)
         page.screenshot(path=os.path.join(INTERMEDIARY_DIR, "screenshot.png"), full_page=True)
+        return
+    if action_type == "wait":
+        ms = int(value) if value is not None else 0
+        page.wait_for_timeout(ms)
         return
     if action_type == "click":
         page.click(locator, timeout=timeout)
@@ -219,9 +372,13 @@ def execute_action(page, action_type, locator, value=None, timeout=8000):
     elif action_type == "dragAndDrop":
         page.drag_and_drop(locator, value, timeout=timeout)
     elif action_type == "validate":
-        text = page.locator(locator).text_content(timeout=timeout)
-        if value and value.lower() not in (text or "").lower():
-            raise AssertionError(f"Expected text '{value}' not found in element")
+        # Use Playwright's assertion auto-wait so we don't fail/heal while the UI is still rendering.
+        if value:
+            from playwright.sync_api import expect
+            expect(page.locator(locator)).to_contain_text(str(value), timeout=timeout)
+            return
+        # Fallback: just ensure the element exists.
+        page.locator(locator).wait_for(state="attached", timeout=timeout)
     else:
         print(f"  ⚠  Unknown action type: {action_type}")
 
@@ -245,18 +402,53 @@ def heal_locator(page, step_description, old_locator):
 
         heal_desc = f"{step_description} (previous locator that no longer works: {old_locator})"
         screenshot = get_page_screenshot(page)
+        _start_dom_change_listener(page)
+        initial_dom_change_count = _get_dom_change_count(page)
         new_locator, locator_type = get_locator_from_ai(dom_with_context, heal_desc, screenshot)
 
         if new_locator:
             formatted = f"xpath={new_locator}" if locator_type == "xpath" else new_locator
             print(f"  ✅ HEALED: new locator = {formatted}")
             return formatted
-        else:
-            print(f"  ❌ HEALING FAILED: AI returned no locator")
-            return None
+
+        print(f"  ❌ HEALING FAILED: AI returned no locator")
+
+        # If the DOM changes shortly after we sent the snapshot to the LLM (async render/network),
+        # retry once with the updated DOM so the LLM can see the newly visible element.
+        settle_info = _wait_for_dom_settle(
+            page,
+            timeout_ms=HEAL_DOM_CHANGE_WINDOW_MS,
+            quiet_ms=HEAL_DOM_CHANGE_QUIET_MS,
+        )
+        changed_since_send = (
+            _get_dom_change_count(page) > initial_dom_change_count
+            or bool(settle_info.get('changed'))
+        )
+
+        if changed_since_send:
+            print("  [HEAL] DOM changed after LLM request; retrying with fresh DOM...")
+            refreshed_dom = get_page_dom_simple(page)
+            refreshed_testid_summary = extract_data_testid_summary(page)
+            refreshed_context = (
+                refreshed_testid_summary + "\n" + refreshed_dom
+                if refreshed_testid_summary
+                else refreshed_dom
+            )
+            refreshed_screenshot = get_page_screenshot(page)
+            retry_desc = f"{heal_desc} (DOM updated after async changes)"
+            retry_locator, retry_type = get_locator_from_ai(refreshed_context, retry_desc, refreshed_screenshot)
+            if retry_locator:
+                formatted = f"xpath={retry_locator}" if retry_type == "xpath" else retry_locator
+                print(f"  ✅ HEALED (retry): new locator = {formatted}")
+                return formatted
+            print(f"  ❌ HEALING FAILED (retry): AI returned no locator")
+
+        return None
     except Exception as e:
         print(f"  ❌ HEALING ERROR: {str(e)[:120]}")
         return None
+    finally:
+        _stop_dom_change_listener(page)
 
 
 def log_healing(spec_path, step_index, comment, old_locator, new_locator):
@@ -346,6 +538,8 @@ def run_script(spec_path):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         page = browser.new_page(viewport={"width": 1920, "height": 1080})
+        page.set_default_timeout(ACTION_TIMEOUT_MS)
+        page.set_default_navigation_timeout(ACTION_TIMEOUT_MS)
         bring_window_to_front()
 
         # Navigate
@@ -385,11 +579,20 @@ def run_script(spec_path):
                 execute_action(page, a_type, locator, value)
                 print(f"         ✅ PASS\n")
                 passed += 1
-                time.sleep(0.3)  # small settle delay
+                try:
+                    page.wait_for_timeout(SETTLE_WAIT_MS)
+                except Exception:
+                    time.sleep(SETTLE_WAIT_MS / 1000.0)
 
             except Exception as original_error:
                 error_msg = str(original_error)[:120]
                 print(f"         ❌ FAILED: {error_msg}")
+
+                # Give the app a chance to finish async work before we capture DOM for healing.
+                try:
+                    wait_for_loader(page)
+                except Exception:
+                    pass
 
                 # ── Self-heal ──
                 # Prefer step_description (natural language) over comment (timestamp) for healing
@@ -405,6 +608,10 @@ def run_script(spec_path):
                 if new_locator:
                     # Retry with healed locator
                     try:
+                        try:
+                            wait_for_loader(page)
+                        except Exception:
+                            pass
                         execute_action(page, a_type, new_locator, value)
                         print(f"         ✅ HEALED & PASS\n")
                         healed += 1
@@ -416,7 +623,10 @@ def run_script(spec_path):
                         # Log the healing
                         log_healing(spec_path, i, desc, locator, new_locator)
 
-                        time.sleep(0.3)
+                        try:
+                            page.wait_for_timeout(SETTLE_WAIT_MS)
+                        except Exception:
+                            time.sleep(SETTLE_WAIT_MS / 1000.0)
 
                     except Exception as retry_error:
                         print(f"         ❌ HEALED LOCATOR ALSO FAILED: {str(retry_error)[:100]}")
