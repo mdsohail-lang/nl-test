@@ -1,0 +1,50 @@
+[
+  {
+    "timestamp": "2026-03-12T15:53:51.202908",
+    "script": "test_20260312_152322.spec.js",
+    "step": 9,
+    "description": "2026-03-12 15:24:42 validate",
+    "old_locator": "body",
+    "new_locator": "xpath=//div[@aria-label='Dashboard']/ancestor::button[@role='tab'][1]"
+  },
+  {
+    "timestamp": "2026-03-12T16:26:05.813637",
+    "script": "test_20260312_152322.spec.js",
+    "step": 1,
+    "description": "2026-03-12 15:23:22 click",
+    "old_locator": "xpath=//input[@id='email']",
+    "new_locator": "xpath=//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-03-12T16:27:02.838071",
+    "script": "test_20260312_152322.spec.js",
+    "step": 2,
+    "description": "2026-03-12 15:23:30 fill",
+    "old_locator": "xpath=//input[@id='email']",
+    "new_locator": "xpath=//input[@id='username']"
+  },
+  {
+    "timestamp": "2026-03-12T16:27:23.294674",
+    "script": "test_20260312_152322.spec.js",
+    "step": 7,
+    "description": "2026-03-12 15:24:18 click",
+    "old_locator": "xpath=//input[@id='passkey']",
+    "new_locator": "xpath=//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-03-12T16:27:42.998543",
+    "script": "test_20260312_152322.spec.js",
+    "step": 8,
+    "description": "2026-03-12 15:24:27 fill",
+    "old_locator": "xpath=//input[@id='passkey']",
+    "new_locator": "xpath=//input[@id='password']"
+  },
+  {
+    "timestamp": "2026-03-12T16:28:27.364527",
+    "script": "test_20260312_152322.spec.js",
+    "step": 27,
+    "description": "2026-03-12 15:27:11 click",
+    "old_locator": "xpath=//*[@data-testid='menuon']",
+    "new_locator": "xpath=//*[@data-testid='menu-icon']"
+  }
+]
