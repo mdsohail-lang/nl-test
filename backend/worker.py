@@ -10,12 +10,18 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+
+UPLOAD_DIR = os.path.join(BACKEND_DIR, 'uploads')
+INTERMEDIARY_DIR = os.path.join(BACKEND_DIR, 'intermediary')
+DEFAULT_SCREENSHOT_PATH = os.path.join(INTERMEDIARY_DIR, 'screenshot.png')
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(INTERMEDIARY_DIR, exist_ok=True)
 
 # Load environment variables from .env file
 def load_env():
-    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    env_path = os.path.join(BACKEND_DIR, '.env')
     env_vars = {}
     if os.path.exists(env_path):
         with open(env_path, 'r') as f:
@@ -29,6 +35,9 @@ def load_env():
 ENV_VARS = load_env()
 SECRET_KEY = ENV_VARS.get('SECRET_KEY', '')
 LLM_API_URL = ENV_VARS.get('LLM_API_URL', 'http://192.168.0.63:4000/v1/chat/completions')
+LLM_MODEL = ENV_VARS.get('LLM_MODEL', 'gpt-5-mini')
+LLM_TEXT_MODEL = ENV_VARS.get('LLM_TEXT_MODEL', LLM_MODEL)
+LLM_VISION_MODEL = ENV_VARS.get('LLM_VISION_MODEL', LLM_MODEL)
 
 def load_app_patterns():
     """Load application-specific patterns for better element finding.
@@ -51,7 +60,7 @@ def load_app_patterns():
         pass
 
     # Fallback: read markdown file if present
-    patterns_path = os.path.join(os.path.dirname(__file__), 'app-patterns.md')
+    patterns_path = os.path.join(BACKEND_DIR, 'app-patterns.md')
     try:
         if os.path.exists(patterns_path):
             with open(patterns_path, 'r', encoding='utf8') as f:
@@ -1725,7 +1734,7 @@ def try_fast_locator(page, step_description):
     return None, None
 
 
-def get_locator_from_ai(page_dom, step_description):
+def get_locator_from_ai(page_dom, step_description, screen=None):
     """
     Send page DOM and step description to LLM to get a smart locator.
     Returns: (locator_string, locator_type) or (None, None) if failed
@@ -1734,6 +1743,11 @@ def get_locator_from_ai(page_dom, step_description):
         print("[LLM] Skipped: SECRET_KEY not configured")
         return None, None
     
+    screen_b64 = str(screen or '').strip()
+    has_screenshot = bool(screen_b64) and screen_b64.lower() != 'none'
+    if not has_screenshot:
+        print('[LLM] No screenshot available; sending DOM-only prompt')
+
     try:
         print(f"[LLM] Sending request for step: {step_description[:60]}...")
         
@@ -1800,77 +1814,134 @@ find a UNIQUE XPath to locate the PRIMARY element that should be interacted with
 
 DO NOT RETURN AN ARRAY. Return ONLY one JSON object.""" 
 
+        message_content = prompt
+        if has_screenshot:
+            message_content = [
+                {
+                    "type": "text",
+                    "text": prompt,
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{screen_b64}",
+                    },
+                },
+            ]
+
+        primary_model = LLM_VISION_MODEL if has_screenshot else LLM_TEXT_MODEL
         payload = {
-            "model": "gpt-5-mini",
+            "model": primary_model,
             "messages": [
                 {
                     "role": "user",
-                    "content": prompt
+                    "content": message_content
                 }
             ]
         }
-        
-        req_data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            LLM_API_URL,
-            data=req_data,
-            headers={
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {SECRET_KEY}'
-            },
-            method='POST'
-        )
-        
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            print(f"[LLM] Full response: {json.dumps(result, indent=2)}")
-            
-            # Extract the response content
-            if result.get('choices') and len(result['choices']) > 0:
-                content = result['choices'][0]['message']['content']
-                print(f"[LLM] Message content: {content}")
-                
-                # Parse JSON from response (may be wrapped in markdown code blocks)
+
+        def send_request(payload_obj, timeout_s=30):
+            req_data = json.dumps(payload_obj).encode('utf-8')
+            req = urllib.request.Request(
+                LLM_API_URL,
+                data=req_data,
+                headers={
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {SECRET_KEY}'
+                },
+                method='POST'
+            )
+            with urllib.request.urlopen(req, timeout=timeout_s) as response:
+                return json.loads(response.read().decode('utf-8'))
+
+        try:
+            result = send_request(payload, timeout_s=30)
+        except urllib.error.HTTPError as e:
+            body = ''
+            try:
+                body = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                body = ''
+            print(
+                f"[LLM] HTTP error from LLM: code={getattr(e, 'code', '?')} reason={getattr(e, 'reason', '')} "
+                f"url={LLM_API_URL} model={primary_model} hasScreenshot={has_screenshot}. "
+                + (f"body={body[:900]}" if body else ""),
+                file=sys.stderr,
+            )
+
+            # Last-resort fallback: retry once without screenshot if the server rejects multimodal payloads.
+            if has_screenshot:
                 try:
-                    # Extract JSON from markdown code blocks if present
-                    json_str = content
-                    if '```json' in content:
-                        json_str = content.split('```json')[1].split('```')[0].strip()
-                    elif '```' in content:
-                        json_str = content.split('```')[1].split('```')[0].strip()
-                    
-                    locator_data = json.loads(json_str)
-                    print(f"[LLM] Parsed response type: {type(locator_data)}, content: {locator_data}")
-                    
-                    # Handle if LLM returns a list instead of object
-                    if isinstance(locator_data, list):
-                        if len(locator_data) > 0:
-                            locator_data = locator_data[0]  # Take first element
-                            print(f"[LLM] Response was list with {len(locator_data) if isinstance(locator_data, (list, dict)) else '?'} items, extracted first element")
-                        else:
-                            print(f"[LLM] Response was empty list")
-                            return None, None
-                    
-                    # Ensure locator_data is a dict
-                    if not isinstance(locator_data, dict):
-                        print(f"[LLM] ERROR: Response is not a dict: {type(locator_data)}")
-                        return None, None
-                    
-                    locator = locator_data.get('locator')
-                    loc_type = locator_data.get('type')
-                    
-                    # Validate that we got a locator value
-                    if locator is None:
-                        print(f"[LLM] Warning: locator value is null in response. Full response: {locator_data}")
-                        return None, None
-                    
-                    print(f"[LLM] Found locator: {locator} (type: {loc_type})")
-                    return locator, loc_type
-                except json.JSONDecodeError as je:
-                    print(f"[LLM] Failed to parse JSON: {je}")
-                    print(f"[LLM] Raw content: {content}")
+                    print("[LLM] Retrying once without screenshot...")
+                    payload_no_image = {
+                        "model": LLM_TEXT_MODEL,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": prompt,
+                            }
+                        ],
+                    }
+                    result = send_request(payload_no_image, timeout_s=30)
+                except Exception as retry_err:
+                    print(f"[LLM] Retry without screenshot failed: {str(retry_err)[:200]}", file=sys.stderr)
                     return None, None
+            else:
+                return None, None
+
+        print(f"[LLM] Full response: {json.dumps(result, indent=2)}")
+
+        # Extract the response content
+        if result.get('choices') and len(result['choices']) > 0:
+            content = result['choices'][0]['message']['content']
+            print(f"[LLM] Message content: {content}")
+
+            # Parse JSON from response (may be wrapped in markdown code blocks)
+            try:
+                # Extract JSON from markdown code blocks if present
+                json_str = content
+                if '```json' in content:
+                    json_str = content.split('```json')[1].split('```')[0].strip()
+                elif '```' in content:
+                    json_str = content.split('```')[1].split('```')[0].strip()
+
+                locator_data = json.loads(json_str)
+                print(f"[LLM] Parsed response type: {type(locator_data)}, content: {locator_data}")
+
+                # Handle if LLM returns a list instead of object
+                if isinstance(locator_data, list):
+                    if len(locator_data) > 0:
+                        locator_data = locator_data[0]  # Take first element
+                        print(
+                            f"[LLM] Response was list with "
+                            f"{len(locator_data) if isinstance(locator_data, (list, dict)) else '?'} items, "
+                            f"extracted first element"
+                        )
+                    else:
+                        print(f"[LLM] Response was empty list")
+                        return None, None
+
+                # Ensure locator_data is a dict
+                if not isinstance(locator_data, dict):
+                    print(f"[LLM] ERROR: Response is not a dict: {type(locator_data)}")
+                    return None, None
+
+                locator = locator_data.get('locator')
+                loc_type = locator_data.get('type')
+
+                # Validate that we got a locator value
+                if locator is None:
+                    print(f"[LLM] Warning: locator value is null in response. Full response: {locator_data}")
+                    return None, None
+
+                print(f"[LLM] Found locator: {locator} (type: {loc_type})")
+                return locator, loc_type
+            except json.JSONDecodeError as je:
+                print(f"[LLM] Failed to parse JSON: {je}")
+                print(f"[LLM] Raw content: {content}")
+                return None, None
+
         print("[LLM] No choices in response")
         return None, None
     except Exception as e:
@@ -2121,6 +2192,20 @@ def get_page_dom_simple(page):
         return str(e)
 
 
+def get_page_screenshot(page):
+    import base64
+
+    try:
+        os.makedirs(INTERMEDIARY_DIR, exist_ok=True)
+        image_bytes = page.screenshot(path=DEFAULT_SCREENSHOT_PATH, full_page=True)
+        if not image_bytes:
+            return None
+        return base64.b64encode(image_bytes).decode("utf-8")
+    except Exception as e:
+        print(f"[BROWSER] Screenshot capture failed: {str(e)[:160]}")
+        return None
+
+
 def get_sidebar_dom_snapshot(page):
     """
     Capture a compact DOM snapshot focused on sidebar + active menu/listbox/popover surfaces.
@@ -2360,11 +2445,12 @@ def find_element_by_ai(page, step_description):
     
     try:
         dom = get_page_dom_simple(page)
+        screenshot = get_page_screenshot(page)
         # Include data-testid summary for better element finding
         testid_summary = extract_data_testid_summary(page)
         dom_with_context = testid_summary + "\n" + dom if testid_summary else dom
         
-        locator, locator_type = get_locator_from_ai(dom_with_context, step_description)
+        locator, locator_type = get_locator_from_ai(dom_with_context, step_description, screenshot)
         
         if locator:
             print(f"[AI] Found locator: {locator} (type: {locator_type})")
@@ -2455,6 +2541,13 @@ def use_locator(page, locator, locator_type, action, value=None, step_descriptio
         # Write step description comment for AI healing context
         if step_description:
             append_script_line(f"// step: {step_description}")
+
+        if action == 'capture_screenshot':
+            os.makedirs(INTERMEDIARY_DIR, exist_ok=True)
+            print("[BROWSER] Taking screenshot...")
+            page.screenshot(path=DEFAULT_SCREENSHOT_PATH, full_page=True)
+            print(f"[BROWSER] Screenshot saved: {DEFAULT_SCREENSHOT_PATH}")
+            return True, None
         
         if action == 'click':
             page.click(formatted_locator)
@@ -2890,7 +2983,7 @@ def decompose_step_with_ai(description):
         )
 
         payload = {
-            "model": "gpt-5-mini",
+            "model": LLM_TEXT_MODEL,
             "messages": [
                 {
                     "role": "user",
@@ -3374,11 +3467,12 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                         wait_for_loader(page)
                         print(f"[EXECUTE] Capturing DOM...")
                         dom = capture_and_store_dom('full', include_testid=True, reason='drag-locator')
+                        screenshot = get_page_screenshot(page)
                         
                         # Find source element
                         source_desc = search_text
                         print(f"[EXECUTE] Finding drag source: {source_desc}")
-                        src_locator, src_type = get_locator_from_ai(dom, f"Find the element to drag: {source_desc}")
+                        src_locator, src_type = get_locator_from_ai(dom, f"Find the element to drag: {source_desc}", screenshot)
                         if not src_locator:
                             error_msg = f'Could not find drag source: "{source_desc}"'
                             print(f"[EXECUTE] FAILED: {error_msg}")
@@ -3388,7 +3482,7 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                             # Find target element
                             target_desc = value
                             print(f"[EXECUTE] Finding drop target: {target_desc}")
-                            tgt_locator, tgt_type = get_locator_from_ai(dom, f"Find the drop target element: {target_desc}")
+                            tgt_locator, tgt_type = get_locator_from_ai(dom, f"Find the drop target element: {target_desc}", screenshot)
                             if not tgt_locator:
                                 error_msg = f'Could not find drop target: "{target_desc}"'
                                 print(f"[EXECUTE] FAILED: {error_msg}")
@@ -3626,8 +3720,9 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                         print("[EXECUTE] Using full-page DOM snapshot for LLM fallback")
                                         dom = capture_and_store_dom('full', include_testid=True, reason='llm-full')
 
+                                    screenshot = get_page_screenshot(page)
                                     llm_attempted = True
-                                    locator, locator_type = get_locator_from_ai(dom or '', description_for_exec or search_text)
+                                    locator, locator_type = get_locator_from_ai(dom or '', description_for_exec or search_text, screenshot)
 
                                 if (
                                     not locator
@@ -3639,9 +3734,11 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                     wait_for_dom_settle(timeout_ms=1600, quiet_ms=250, label='llm-null-sidebar-retry')
                                     retry_dom = capture_and_store_dom('sidebar', include_testid=True, reason='llm-sidebar-retry')
                                     llm_used_sidebar_dom = True
+                                    retry_screenshot = get_page_screenshot(page)
                                     locator, locator_type = get_locator_from_ai(
                                         retry_dom or '',
-                                        description_for_exec or search_text
+                                        description_for_exec or search_text,
+                                        retry_screenshot,
                                     )
                                 elif (
                                     not locator
@@ -3655,9 +3752,11 @@ def execute_single_test(browser, steps, website_url, job_id, test_name, page=Non
                                     wait_for_dom_settle(timeout_ms=1600, quiet_ms=250, label='llm-null-calendar-retry')
                                     retry_dom = capture_and_store_dom('calendar', include_testid=True, reason='llm-calendar-retry')
                                     llm_used_calendar_dom = True
+                                    retry_screenshot = get_page_screenshot(page)
                                     locator, locator_type = get_locator_from_ai(
                                         retry_dom or '',
-                                        description_for_exec or search_text
+                                        description_for_exec or search_text,
+                                        retry_screenshot,
                                     )
 
                                 if not locator:

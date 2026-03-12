@@ -30,6 +30,7 @@ sys.path.insert(0, BACKEND_DIR)
 from worker import (
     get_locator_from_ai,
     get_page_dom_simple,
+    get_page_screenshot,
     extract_data_testid_summary,
     wait_for_loader,
     bring_window_to_front,
@@ -37,6 +38,7 @@ from worker import (
 
 SCRIPT_DIR = os.path.join(BACKEND_DIR, "playwright_script")
 HEAL_LOG_FILE = os.path.join(SCRIPT_DIR, "heal_log.json")
+INTERMEDIARY_DIR = os.path.join(BACKEND_DIR, "intermediary")
 
 
 # ─── Spec File Parser ──────────────────────────────────────────────────────────
@@ -143,6 +145,27 @@ def parse_spec_file(file_path):
                     pending_step_desc = None
                     continue
 
+                # ── page.screenshot ──
+                m = re.search(
+                    r'await\s+page\.screenshot\(\s*\{[^}]*path\s*:\s*' + STR_PAT + r'[^}]*\}\s*\)',
+                    stripped,
+                )
+                if m:
+                    path = m.group(1) if m.group(1) is not None else m.group(2)
+                    actions.append(
+                        _action(
+                            idx,
+                            pending_comment,
+                            raw_line,
+                            "capture_screenshot",
+                            path,
+                            step_description=pending_step_desc,
+                        )
+                    )
+                    pending_comment = None
+                    pending_step_desc = None
+                    continue
+
                 # ── expect(...).toContainText(...) ──
                 m = re.search(
                     r'await\s+expect\(page\.locator\(' + STR_PAT + r'\)\)\.toContainText\(' + STR_PAT + r'\)',
@@ -175,6 +198,10 @@ def _action(line_index, comment, raw_line, action_type, locator, value=None, ste
 
 def execute_action(page, action_type, locator, value=None, timeout=8000):
     """Execute a single Playwright action. Raises on failure."""
+    if action_type == "capture_screenshot":
+        os.makedirs(INTERMEDIARY_DIR, exist_ok=True)
+        page.screenshot(path=os.path.join(INTERMEDIARY_DIR, "screenshot.png"), full_page=True)
+        return
     if action_type == "click":
         page.click(locator, timeout=timeout)
     elif action_type == "dblclick":
@@ -217,7 +244,8 @@ def heal_locator(page, step_description, old_locator):
         dom_with_context = testid_summary + "\n" + dom if testid_summary else dom
 
         heal_desc = f"{step_description} (previous locator that no longer works: {old_locator})"
-        new_locator, locator_type = get_locator_from_ai(dom_with_context, heal_desc)
+        screenshot = get_page_screenshot(page)
+        new_locator, locator_type = get_locator_from_ai(dom_with_context, heal_desc, screenshot)
 
         if new_locator:
             formatted = f"xpath={new_locator}" if locator_type == "xpath" else new_locator
